@@ -1,0 +1,625 @@
+import os
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+import tkinter as tk
+from tkinter import messagebox
+
+
+DEFAULT_ENV_PATH = ".env"
+
+
+ENV_SPECS: List[Dict[str, Any]] = [
+    {
+        "key": "KABUS_API_BASE_URL",
+        "default": "http://localhost:18080",
+        "type": "str",
+        "desc": "KabuStationの接続先URL。通常はlocalhostのままでOK。変更すると接続先が変わります。",
+    },
+    {
+        "key": "KABUS_API_PASSWORD",
+        "default": "",
+        "type": "password",
+        "desc": "KabuStation APIトークン取得用パスワード。未設定/誤設定だとトークン取得に失敗します。",
+    },
+    {
+        "key": "KABUS_EXCHANGE",
+        "default": "1",
+        "type": "str",
+        "desc": "取引所コード。通常は1(東証)。銘柄取得・発注のマーケット指定に影響します。",
+    },
+    {
+        "key": "ENABLE_GUI",
+        "default": "0",
+        "type": "bool",
+        "desc": "1でGUI表示、0でコンソールのみ。GUIの有無が切り替わります。",
+    },
+    {
+        "key": "PROMPT_CONFIG",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で起動時に設定入力を促します。0にすると起動プロンプトを抑制します（.envで固定運用向け）。",
+    },
+    {
+        "key": "EDINET_API_KEY",
+        "default": "",
+        "type": "str",
+        "desc": "EDINET APIキー。空だとEDINET取得が制限/失敗する可能性があります。",
+    },
+    {
+        "key": "EDINET_POLL_SECONDS",
+        "default": "60",
+        "type": "int",
+        "desc": "EDINETのチェック間隔（秒）。短くすると検知が速いがAPI負荷が増えます。",
+    },
+    {
+        "key": "EDINET_WATCH_WINDOW_SECONDS",
+        "default": "600",
+        "type": "int",
+        "desc": "EDINET由来で追加した銘柄を監視する最大時間（秒）。長いほど追従します。",
+    },
+    {
+        "key": "EDINET_REQUIRE_VIP",
+        "default": "0",
+        "type": "bool",
+        "desc": "1にするとVIP提出者のみ反応。0なら広く拾います（ノイズ増減に影響）。",
+    },
+    {
+        "key": "NEWS_POLL_SECONDS",
+        "default": "45",
+        "type": "int",
+        "desc": "ニュースチェック間隔（秒）。短いほど検知は速いがアクセス頻度が増えます。",
+    },
+    {
+        "key": "NEWS_LOOKBACK_MINUTES",
+        "default": "30",
+        "type": "int",
+        "desc": "何分以内のニュースを対象にするか。短いほど『新着のみ』になります。",
+    },
+    {
+        "key": "NEWS_WATCH_WINDOW_SECONDS",
+        "default": "300",
+        "type": "int",
+        "desc": "ニュースで追加した銘柄の監視時間（秒）。長いほどフォローします。",
+    },
+    {
+        "key": "NEWS_VOLUME_MULT_FACTOR",
+        "default": "1.5",
+        "type": "float",
+        "desc": "ニュース由来銘柄の出来高倍率判定を厳しくする係数。上げるほどダマシが減るが検知も減ります。",
+    },
+    {
+        "key": "NEWS_ALIASES_PATH",
+        "default": "aliases.json",
+        "type": "str",
+        "desc": "略称辞書JSONのパス。変更すると参照するファイルが変わります。",
+    },
+    {
+        "key": "WATCH_POLL_SECONDS_OFF_SESSION",
+        "default": "10",
+        "type": "float",
+        "desc": "場外（取引時間外）の監視間隔（秒）。短いほど監視が細かいが負荷が増えます。",
+    },
+    {
+        "key": "WATCH_EARLY_STOP_SECONDS",
+        "default": "60",
+        "type": "float",
+        "desc": "値動きが無い場合の早期打ち切り判定時間（秒）。短いほど早く監視終了します。",
+    },
+    {
+        "key": "WATCH_EARLY_STOP_PRICE_PCT",
+        "default": "0.2",
+        "type": "float",
+        "desc": "早期打ち切りの価格変化率(%)しきい値。小さいほど『動いた』判定になり打ち切りにくくなります。",
+    },
+    {
+        "key": "WATCH_EARLY_STOP_VOLUME_MULT_DELTA",
+        "default": "0.05",
+        "type": "float",
+        "desc": "早期打ち切りの出来高倍率変化のしきい値。小さいほど打ち切りにくくなります。",
+    },
+    {
+        "key": "WATCH_VOLRATE_EMA_ALPHA",
+        "default": "0.2",
+        "type": "float",
+        "desc": "出来高倍率EMAの平滑化係数。大きいほど直近に敏感、小さいほど滑らかになります。",
+    },
+    {
+        "key": "WATCH_VOLRATE_MIN_BASE",
+        "default": "1.0",
+        "type": "float",
+        "desc": "出来高倍率のベース下限。小さくし過ぎるとノイズが増えることがあります。",
+    },
+    {
+        "key": "WATCH_VOLRATE_WINDOW_SECONDS",
+        "default": "10",
+        "type": "float",
+        "desc": "出来高倍率を計算する時間窓（秒）。短いほど短期変化に反応します。",
+    },
+    {
+        "key": "WATCH_MAX_SYMBOLS",
+        "default": "8",
+        "type": "int",
+        "desc": "同時監視の上限銘柄数。増やすと追えるがAPI負荷/制限に当たりやすくなります。",
+    },
+    {
+        "key": "WATCH_RATE_LIMIT_BACKOFF_BASE",
+        "default": "5",
+        "type": "float",
+        "desc": "APIレート制限時の待機（秒）基本値。大きいほど回復まで待ちます。",
+    },
+    {
+        "key": "WATCH_RATE_LIMIT_BACKOFF_MAX",
+        "default": "60",
+        "type": "float",
+        "desc": "APIレート制限時の待機（秒）最大値。大きいほど最大待機が長くなります。",
+    },
+    {
+        "key": "ORDER_MODE",
+        "default": "manual",
+        "type": "str",
+        "desc": "manual=手動、auto=自動発注。autoにすると条件一致で注文を出すロジックが動きます。",
+    },
+    {
+        "key": "ORDER_SIDE_MODE",
+        "default": "both",
+        "type": "str",
+        "desc": "both/buy/sell。発注方向の制御。buyのみ等にすると片側だけになります。",
+    },
+    {
+        "key": "ORDER_CASH_MARGIN",
+        "default": "cash",
+        "type": "str",
+        "desc": "cash=現物、margin=信用。注文種別に影響します。",
+    },
+    {
+        "key": "ORDER_TYPE",
+        "default": "market",
+        "type": "str",
+        "desc": "market=成行、limit_pct=指値（乖離率指定）。指値運用に切り替えると約定条件が変わります。",
+    },
+    {
+        "key": "ORDER_LIMIT_PCT",
+        "default": "1",
+        "type": "float",
+        "desc": "指値（limit_pct）の乖離率%。大きいほど指値が離れて約定しにくい場合があります。",
+    },
+    {
+        "key": "ORDER_QTY",
+        "default": "100",
+        "type": "int",
+        "desc": "注文数量。実売買の株数に直結します（注意）。",
+    },
+    {
+        "key": "ORDER_DRY_RUN",
+        "default": "1",
+        "type": "bool",
+        "desc": "1でドライラン（実発注しない）。0にすると実際に発注します（注意）。",
+    },
+    {
+        "key": "ORDER_CONFIRM",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で発注前確認あり。0で確認なし（自動運用向けだが注意）。",
+    },
+    {
+        "key": "ORDER_VOLUME_MULTIPLIER",
+        "default": "3",
+        "type": "float",
+        "desc": "自動発注トリガーの出来高倍率。小さいほど発注しやすく、誤発注リスクも増えます。",
+    },
+    {
+        "key": "ORDER_MIN_PRICE_PCT",
+        "default": "0.3",
+        "type": "float",
+        "desc": "自動発注に必要な最低価格変動率(%)。小さいほど発注が増えます。",
+    },
+    {
+        "key": "ORDER_CONSECUTIVE_HITS",
+        "default": "2",
+        "type": "int",
+        "desc": "条件一致が何回連続で出たら発注するか。大きいほど慎重になります。",
+    },
+    {
+        "key": "SURGE_PRICE_PCT",
+        "default": "2",
+        "type": "float",
+        "desc": "急騰イベントの価格変化率(%)。小さいほど検知が増えます。",
+    },
+    {
+        "key": "SURGE_VOLUME_MULTIPLIER",
+        "default": "2",
+        "type": "float",
+        "desc": "急騰イベントの出来高倍率。小さいほど検知が増えます。",
+    },
+    {
+        "key": "CRASH_PRICE_PCT",
+        "default": "2",
+        "type": "float",
+        "desc": "急落イベントの価格変化率(%)。小さいほど検知が増えます。",
+    },
+    {
+        "key": "CRASH_VOLUME_MULTIPLIER",
+        "default": "2",
+        "type": "float",
+        "desc": "急落イベントの出来高倍率。小さいほど検知が増えます。",
+    },
+    {
+        "key": "AUTO_EXIT_ENABLE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1で自動決済を有効化。利確/損切り/停滞での手仕舞いロジックが動きます。",
+    },
+    {
+        "key": "AUTO_EXIT_PROFIT_YEN_PER_100",
+        "default": "1000",
+        "type": "float",
+        "desc": "100株あたりの利確額（円）。小さいほど早く利確します。",
+    },
+    {
+        "key": "AUTO_EXIT_STOPLOSS_YEN_PER_100",
+        "default": "500",
+        "type": "float",
+        "desc": "100株あたりの損切り額（円）。小さいほど早く損切りします。",
+    },
+    {
+        "key": "AUTO_EXIT_STAGNATION_SECONDS",
+        "default": "120",
+        "type": "float",
+        "desc": "停滞判定の時間（秒）。短いほど『動かない』で決済しやすくなります。",
+    },
+    {
+        "key": "AUTO_EXIT_STAGNATION_PRICE_PCT",
+        "default": "0.2",
+        "type": "float",
+        "desc": "停滞判定の価格変動率(%)。小さいほど停滞扱いになりにくいです。",
+    },
+    {
+        "key": "AUTO_EXIT_STAGNATION_VOLUME_MULT",
+        "default": "1.05",
+        "type": "float",
+        "desc": "停滞判定の出来高倍率。小さいほど停滞扱いになりにくいです。",
+    },
+    {
+        "key": "AUTO_EXIT_STAGNATION_HITS",
+        "default": "5",
+        "type": "int",
+        "desc": "停滞判定が何回続いたら決済するか。大きいほど慎重になります。",
+    },
+    {
+        "key": "EDINET_CODE_LIST_PATH",
+        "default": "EdinetcodeDlInfo.csv",
+        "type": "str",
+        "desc": "EDINETコードリストCSVのパス。銘柄コード変換に使用します。",
+    },
+]
+
+
+def _parse_env_file(path: str) -> Tuple[Dict[str, str], List[str]]:
+    """Return (env_map, raw_lines). Keeps raw lines to preserve order/comments."""
+    env: Dict[str, str] = {}
+    if not os.path.exists(path):
+        return env, []
+
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        key = k.strip()
+        val = v.strip()
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        if key:
+            env[key] = val
+
+    return env, lines
+
+
+def _serialize_env_value(v: str) -> str:
+    # Quote only if needed (spaces or #).
+    if any(ch.isspace() for ch in v) or "#" in v:
+        return '"' + v.replace('"', '\\"') + '"'
+    return v
+
+
+def _spec_by_key() -> Dict[str, Dict[str, Any]]:
+    return {str(s["key"]): s for s in ENV_SPECS}
+
+
+def _to_bool_str(b: bool) -> str:
+    return "1" if b else "0"
+
+
+def _parse_bool_str(s: str) -> bool:
+    return (s or "").strip() in {"1", "true", "True"}
+
+
+def _write_env_file(path: str, new_env: Dict[str, str], raw_lines: List[str]) -> None:
+    keys_in_file = set()
+    out_lines: List[str] = []
+
+    # Rewrite existing keys in-place (preserve comments/unknown lines)
+    for line in raw_lines:
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            out_lines.append(line)
+            continue
+
+        k, _ = s.split("=", 1)
+        key = k.strip()
+        if key in new_env:
+            keys_in_file.add(key)
+            out_lines.append(f"{key}={_serialize_env_value(str(new_env[key]))}")
+        else:
+            out_lines.append(line)
+
+    # Append missing keys
+    missing = [k for k in new_env.keys() if k not in keys_in_file]
+    if missing:
+        if out_lines and out_lines[-1].strip() != "":
+            out_lines.append("")
+        for key in missing:
+            out_lines.append(f"{key}={_serialize_env_value(str(new_env[key]))}")
+
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(out_lines) + "\n")
+
+
+def _prompt(key: str, current: Optional[str], default: str) -> str:
+    cur_disp = current if current is not None else ""
+    hint = cur_disp if cur_disp != "" else default
+    s = input(f"{key} [{hint}]: ").strip()
+    if s == "":
+        if current is not None:
+            return current
+        return default
+    return s
+
+
+def _run_gui(env_path: str) -> int:
+    env, raw_lines = _parse_env_file(env_path)
+    specs = ENV_SPECS
+    spec_map = _spec_by_key()
+
+    root = tk.Tk()
+    root.title(".env 設定エディタ")
+    root.geometry("980x700")
+
+    top = tk.Frame(root)
+    top.pack(fill="x", padx=10, pady=8)
+
+    tk.Label(top, text=f".env: {os.path.abspath(env_path)}").pack(side="left")
+
+    main = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+    main.pack(fill="both", expand=True, padx=10, pady=10)
+
+    left = tk.Frame(main)
+    right = tk.Frame(main)
+    main.add(left, stretch="always")
+    main.add(right)
+
+    # Scrollable list
+    canvas = tk.Canvas(left, highlightthickness=0)
+    scrollbar = tk.Scrollbar(left, orient="vertical", command=canvas.yview)
+    scroll_frame = tk.Frame(canvas)
+    scroll_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def _on_mousewheel(event: tk.Event) -> str:
+        try:
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return "break"
+            canvas.yview_scroll(int(-delta / 120), "units")
+            return "break"
+        except Exception:
+            return "break"
+
+    desc_var = tk.StringVar(value="項目の右にある [説明] を押すと、ここに説明が出ます。")
+    tk.Label(right, text="説明", font=("Meiryo", 11, "bold")).pack(anchor="w")
+    desc_box = tk.Message(right, textvariable=desc_var, width=320)
+    desc_box.pack(fill="x", pady=(4, 10))
+
+    tk.Label(right, text="操作", font=("Meiryo", 11, "bold")).pack(anchor="w")
+
+    vars_str: Dict[str, tk.StringVar] = {}
+    vars_bool: Dict[str, tk.BooleanVar] = {}
+
+    def show_desc(key: str) -> None:
+        spec = spec_map.get(key, {})
+        desc = str(spec.get("desc") or "")
+        if not desc:
+            desc = "説明は未設定です。"
+        desc_var.set(f"{key}\n\n{desc}")
+
+    def initial_value(spec: Dict[str, Any]) -> str:
+        key = str(spec["key"])
+        if key in env:
+            return str(env[key])
+        return str(spec.get("default", ""))
+
+    def build_row(r: int, spec: Dict[str, Any]) -> None:
+        key = str(spec["key"])
+        typ = str(spec.get("type") or "str")
+
+        tk.Label(scroll_frame, text=key, width=30, anchor="w").grid(row=r, column=0, sticky="w", padx=(0, 6), pady=2)
+
+        if typ == "bool":
+            bv = tk.BooleanVar(value=_parse_bool_str(initial_value(spec)))
+            vars_bool[key] = bv
+            cb = tk.Checkbutton(scroll_frame, variable=bv)
+            cb.grid(row=r, column=1, sticky="w", pady=2)
+            cb.bind("<FocusIn>", lambda e, k=key: show_desc(k))
+            cb.bind("<MouseWheel>", _on_mousewheel)
+        else:
+            sv = tk.StringVar(value=initial_value(spec))
+            vars_str[key] = sv
+            show = "*" if typ == "password" else ""
+            ent = tk.Entry(scroll_frame, textvariable=sv, width=42, show=show)
+            ent.grid(row=r, column=1, sticky="w", pady=2)
+            ent.bind("<FocusIn>", lambda e, k=key: show_desc(k))
+            ent.bind("<MouseWheel>", _on_mousewheel)
+
+        tk.Button(scroll_frame, text="説明", command=lambda k=key: show_desc(k), width=6).grid(
+            row=r, column=2, sticky="w", padx=(8, 0), pady=2
+        )
+
+    for idx, spec in enumerate(specs):
+        build_row(idx, spec)
+
+    btns = tk.Frame(right)
+    btns.pack(fill="x", pady=(6, 6))
+
+    def collect_env() -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for spec in specs:
+            key = str(spec["key"])
+            typ = str(spec.get("type") or "str")
+            if typ == "bool":
+                out[key] = _to_bool_str(bool(vars_bool[key].get()))
+            else:
+                out[key] = str(vars_str[key].get()).strip()
+        return out
+
+    def validate_env(new_env: Dict[str, str]) -> Optional[str]:
+        for spec in specs:
+            key = str(spec["key"])
+            typ = str(spec.get("type") or "str")
+            val = (new_env.get(key) or "").strip()
+
+            if typ == "int":
+                try:
+                    int(val)
+                except Exception:
+                    return f"{key} は整数で入力してください: {val!r}"
+            if typ == "float":
+                try:
+                    float(val)
+                except Exception:
+                    return f"{key} は数値(float)で入力してください: {val!r}"
+        return None
+
+    def on_save() -> None:
+        new_env = collect_env()
+        err = validate_env(new_env)
+        if err:
+            messagebox.showerror("入力エラー", err)
+            return
+        try:
+            _write_env_file(env_path, new_env, raw_lines)
+        except Exception as e:
+            messagebox.showerror("保存失敗", str(e))
+            return
+        messagebox.showinfo("保存完了", ".env を保存しました。\n次回起動から反映されます。")
+
+    def on_ctrl_s(_: tk.Event) -> str:
+        on_save()
+        return "break"
+
+    def on_reload() -> None:
+        nonlocal env, raw_lines
+        env, raw_lines = _parse_env_file(env_path)
+        for spec in specs:
+            key = str(spec["key"])
+            typ = str(spec.get("type") or "str")
+            v = env.get(key)
+            if v is None:
+                v = str(spec.get("default", ""))
+            if typ == "bool":
+                vars_bool[key].set(_parse_bool_str(str(v)))
+            else:
+                vars_str[key].set(str(v))
+
+    tk.Button(btns, text="再読込", command=on_reload, width=10).pack(side="left")
+    tk.Button(btns, text="保存", command=on_save, width=10).pack(side="left", padx=(8, 0))
+    tk.Button(btns, text="閉じる", command=root.destroy, width=10).pack(side="left", padx=(8, 0))
+
+    # Scroll / shortcut bindings
+    canvas.bind("<MouseWheel>", _on_mousewheel)
+    scroll_frame.bind("<MouseWheel>", _on_mousewheel)
+    root.bind_all("<Control-s>", on_ctrl_s)
+    root.bind_all("<Control-S>", on_ctrl_s)
+
+    show_desc(str(specs[0]["key"]))
+    root.mainloop()
+    return 0
+
+
+def main(argv: List[str]) -> int:
+    if "--cli" in argv:
+        args = [a for a in argv[1:] if a != "--cli"]
+        env_path = args[0] if len(args) >= 1 else DEFAULT_ENV_PATH
+    else:
+        env_path = argv[1] if len(argv) >= 2 else DEFAULT_ENV_PATH
+
+    env, raw_lines = _parse_env_file(env_path)
+
+    print(f"[ENV] .env path: {os.path.abspath(env_path)}")
+    if not raw_lines:
+        print("[ENV] .env not found or empty. It will be created.")
+
+    if "--cli" not in argv:
+        return _run_gui(env_path)
+
+    updated = dict(env)
+
+    print("[ENV] Enter values (blank keeps current / uses default if missing).")
+    for spec in ENV_SPECS:
+        key = spec["key"]
+        default = spec["default"]
+        current = updated.get(key)
+
+        if key.upper().endswith("PASSWORD") and current is not None:
+            cur_mask = "(set)"
+        else:
+            cur_mask = current
+
+        # Show masked current in prompt message by passing current, but avoid leaking passwords.
+        shown_current = None
+        if key.upper().endswith("PASSWORD") and current is not None:
+            shown_current = "(set)"
+        else:
+            shown_current = current
+
+        val = _prompt(key, shown_current, default)
+        if key.upper().endswith("PASSWORD") and val == "(set)":
+            # If user just hit enter, _prompt returns current/default, but with masked current it can return "(set)".
+            # Treat it as unchanged when password was already set.
+            if current is not None:
+                val = current
+            else:
+                val = ""
+
+        updated[key] = val
+
+    _write_env_file(env_path, updated, raw_lines)
+    print("[ENV] Saved.")
+
+    # Show summary (avoid printing secrets)
+    print("[ENV] Current values:")
+    for spec in ENV_SPECS:
+        key = spec["key"]
+        val = updated.get(key, "")
+        if key.upper().endswith("PASSWORD") and val:
+            disp = "(set)"
+        else:
+            disp = val
+        print(f"  {key}={disp}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
