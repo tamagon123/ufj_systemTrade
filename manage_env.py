@@ -461,7 +461,7 @@ def _run_gui(env_path: str) -> int:
 
     root = tk.Tk()
     root.title(".env 設定エディタ")
-    root.geometry("980x700")
+    root.geometry("1140x700")
 
     top = tk.Frame(root)
     top.pack(fill="x", padx=10, pady=8)
@@ -500,15 +500,35 @@ def _run_gui(env_path: str) -> int:
             return "break"
 
     desc_var = tk.StringVar(value="項目の右にある [説明] を押すと、ここに説明が出ます。")
-    tk.Label(right, text="説明", font=("Meiryo", 11, "bold")).pack(anchor="w")
+    tk.Label(right, text="説明", font=("Meiryo", 11, "bold")).pack(anchor="w", padx=(8, 0))
     desc_box = tk.Message(right, textvariable=desc_var, width=320)
-    desc_box.pack(fill="x", pady=(4, 10))
+    desc_box.pack(fill="x", pady=(4, 10), padx=(8, 0))
 
-    tk.Label(right, text="操作", font=("Meiryo", 11, "bold")).pack(anchor="w")
+    tk.Label(right, text="操作", font=("Meiryo", 11, "bold")).pack(anchor="w", padx=(8, 0))
 
     vars_str: Dict[str, tk.StringVar] = {}
     vars_bool: Dict[str, tk.BooleanVar] = {}
     focus_widgets: List[tk.Widget] = []
+    widget_to_key_label: Dict[tk.Widget, tk.Label] = {}
+    current_highlight_label: Optional[tk.Label] = None
+    normal_key_label_font = ("Meiryo", 10, "normal")
+    highlight_key_label_font = ("Meiryo", 10, "normal")
+
+    def _set_current_highlight(label: Optional[tk.Label]) -> None:
+        nonlocal current_highlight_label
+        try:
+            if current_highlight_label is not None:
+                current_highlight_label.config(fg="black", font=normal_key_label_font)
+        except Exception:
+            pass
+
+        current_highlight_label = label
+
+        try:
+            if current_highlight_label is not None:
+                current_highlight_label.config(fg="red", font=highlight_key_label_font)
+        except Exception:
+            pass
 
     def _focus_move(delta: int) -> str:
         try:
@@ -569,6 +589,10 @@ def _run_gui(env_path: str) -> int:
             desc = "説明は未設定です。"
         desc_var.set(f"{key}\n\n{desc}")
 
+    def _on_focus_in(widget: tk.Widget, key: str) -> None:
+        show_desc(key)
+        _set_current_highlight(widget_to_key_label.get(widget))
+
     def initial_value(spec: Dict[str, Any]) -> str:
         key = str(spec["key"])
         if key in env:
@@ -579,14 +603,16 @@ def _run_gui(env_path: str) -> int:
         key = str(spec["key"])
         typ = str(spec.get("type") or "str")
 
-        tk.Label(scroll_frame, text=key, width=30, anchor="w").grid(row=r, column=0, sticky="w", padx=(0, 6), pady=2)
+        key_label = tk.Label(scroll_frame, text=key, width=38, anchor="w", font=normal_key_label_font)
+        key_label.grid(row=r, column=0, sticky="w", padx=(0, 6), pady=2)
 
         if typ == "bool":
             bv = tk.BooleanVar(value=_parse_bool_str(initial_value(spec)))
             vars_bool[key] = bv
             cb = tk.Checkbutton(scroll_frame, variable=bv)
-            cb.grid(row=r, column=1, sticky="w", pady=2)
-            cb.bind("<FocusIn>", lambda e, k=key: show_desc(k))
+            cb.grid(row=r, column=1, sticky="w", pady=2, padx=(20, 0))
+            widget_to_key_label[cb] = key_label
+            cb.bind("<FocusIn>", lambda e, w=cb, k=key: _on_focus_in(w, k))
             cb.bind("<MouseWheel>", _on_mousewheel)
             cb.bind("<space>", lambda e, w=cb: (w.invoke(), "break")[1])
             _bind_focus_keys(cb)
@@ -595,16 +621,13 @@ def _run_gui(env_path: str) -> int:
             sv = tk.StringVar(value=initial_value(spec))
             vars_str[key] = sv
             show = "*" if typ == "password" else ""
-            ent = tk.Entry(scroll_frame, textvariable=sv, width=42, show=show)
-            ent.grid(row=r, column=1, sticky="w", pady=2)
-            ent.bind("<FocusIn>", lambda e, k=key: show_desc(k))
+            ent = tk.Entry(scroll_frame, textvariable=sv, width=34, show=show)
+            ent.grid(row=r, column=1, sticky="w", pady=2, padx=(20, 0))
+            widget_to_key_label[ent] = key_label
+            ent.bind("<FocusIn>", lambda e, w=ent, k=key: _on_focus_in(w, k))
             ent.bind("<MouseWheel>", _on_mousewheel)
             _bind_focus_keys(ent)
             focus_widgets.append(ent)
-
-        tk.Button(scroll_frame, text="説明", command=lambda k=key: show_desc(k), width=6).grid(
-            row=r, column=2, sticky="w", padx=(8, 0), pady=2
-        )
 
     row_i = 0
     prev_section = ""
@@ -698,6 +721,24 @@ def _run_gui(env_path: str) -> int:
     root.bind_all("<Control-S>", on_ctrl_s)
 
     show_desc(str(specs[0]["key"]))
+
+    def _focus_first() -> None:
+        try:
+            if not focus_widgets:
+                return
+            w0 = focus_widgets[0]
+            w0.focus_set()
+            try:
+                if isinstance(w0, tk.Entry):
+                    w0.selection_range(0, "end")
+                    w0.icursor("end")
+            except Exception:
+                pass
+            _set_current_highlight(widget_to_key_label.get(w0))
+        except Exception:
+            pass
+
+    root.after(100, _focus_first)
     root.mainloop()
     return 0
 
