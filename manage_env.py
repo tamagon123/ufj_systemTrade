@@ -95,6 +95,78 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "略称辞書JSONのパス。変更すると参照するファイルが変わります。",
     },
     {
+        "key": "MANUAL_WATCH_SYMBOLS",
+        "default": "",
+        "type": "str",
+        "desc": "手動監視銘柄（最大5銘柄）。カンマ区切りで証券コードを指定します。例: 7203,6758",
+    },
+    {
+        "key": "MANUAL_WATCH_WINDOW_SECONDS",
+        "default": "86400",
+        "type": "float",
+        "desc": "手動監視銘柄の監視ウィンドウ（秒）。非常に長い値を設定して常時監視とします。",
+    },
+    {
+        "key": "LUNCH_BATCH_ENABLE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で昼休みバッチ（指定時間帯に検知した銘柄をまとめて監視開始）を有効化します。",
+    },
+    {
+        "key": "LUNCH_BATCH_START_HHMM",
+        "default": "11:30",
+        "type": "str",
+        "desc": "昼休みバッチの溜め込み開始時刻(HH:MM)。",
+    },
+    {
+        "key": "LUNCH_BATCH_END_HHMM",
+        "default": "12:30",
+        "type": "str",
+        "desc": "昼休みバッチの解放時刻(HH:MM)。この時刻にまとめてwatchlistへ追加します。",
+    },
+    {
+        "key": "MORNING_BATCH_ENABLE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で朝バッチ（指定時間帯に検知した当日材料をまとめて監視開始）を有効化します。",
+    },
+    {
+        "key": "MORNING_BATCH_START_HHMM",
+        "default": "00:00",
+        "type": "str",
+        "desc": "朝バッチの溜め込み開始時刻(HH:MM)。",
+    },
+    {
+        "key": "MORNING_BATCH_END_HHMM",
+        "default": "09:00",
+        "type": "str",
+        "desc": "朝バッチの解放時刻(HH:MM)。",
+    },
+    {
+        "key": "AFTERHOURS_ADD_STOP_ENABLE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で場引け後の一定時間帯は自動でwatchlistへ追加しません（情報収集のみ）。",
+    },
+    {
+        "key": "AFTERHOURS_ADD_STOP_START_HHMM",
+        "default": "15:30",
+        "type": "str",
+        "desc": "場引け後の自動追加停止の開始時刻(HH:MM)。",
+    },
+    {
+        "key": "AFTERHOURS_ADD_STOP_END_HHMM",
+        "default": "24:00",
+        "type": "str",
+        "desc": "場引け後の自動追加停止の終了時刻(HH:MM)。",
+    },
+    {
+        "key": "SPECIAL_QUOTE_REMOVE_STREAK",
+        "default": "3",
+        "type": "int",
+        "desc": "特別買/売気配が連続した銘柄を監視対象から外すまでの連続回数。0以下で無効。",
+    },
+    {
         "key": "WATCH_POLL_SECONDS_OFF_SESSION",
         "default": "10",
         "type": "float",
@@ -436,6 +508,59 @@ def _run_gui(env_path: str) -> int:
 
     vars_str: Dict[str, tk.StringVar] = {}
     vars_bool: Dict[str, tk.BooleanVar] = {}
+    focus_widgets: List[tk.Widget] = []
+
+    def _focus_move(delta: int) -> str:
+        try:
+            if not focus_widgets:
+                return "break"
+
+            current = root.focus_get()
+            if current in focus_widgets:
+                idx = focus_widgets.index(current)
+            else:
+                idx = 0
+
+            n = len(focus_widgets)
+            next_idx = (idx + int(delta)) % n
+            focus_widgets[next_idx].focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _bind_focus_keys(w: tk.Widget) -> None:
+        w.bind("<Return>", lambda e: _focus_move(+1))
+        w.bind("<Shift-Return>", lambda e: _focus_move(-1))
+        w.bind("<KP_Enter>", lambda e: _focus_move(+1))
+        w.bind("<Shift-KP_Enter>", lambda e: _focus_move(-1))
+
+    def _section_title_for_key(key: str) -> str:
+        k = str(key or "")
+        if k.startswith("KABUS_"):
+            return "KabuStation"
+        if k in {"ENABLE_GUI", "PROMPT_CONFIG"}:
+            return "起動/表示"
+        if k.startswith("EDINET_"):
+            return "EDINET"
+        if k.startswith("NEWS_"):
+            return "ニュース"
+        if k.startswith("MANUAL_WATCH_"):
+            return "手動監視"
+        if k.startswith("LUNCH_BATCH_"):
+            return "昼休みバッチ"
+        if k.startswith("MORNING_BATCH_"):
+            return "朝バッチ"
+        if k.startswith("AFTERHOURS_ADD_STOP_"):
+            return "場引け後の自動追加停止"
+        if k.startswith("WATCH_") or k in {"SPECIAL_QUOTE_REMOVE_STREAK"}:
+            return "監視(Watchlist)"
+        if k.startswith("ORDER_"):
+            return "注文"
+        if k.startswith("SURGE_") or k.startswith("CRASH_"):
+            return "イベント検知"
+        if k.startswith("AUTO_EXIT_"):
+            return "自動決済"
+        return "その他"
 
     def show_desc(key: str) -> None:
         spec = spec_map.get(key, {})
@@ -463,6 +588,9 @@ def _run_gui(env_path: str) -> int:
             cb.grid(row=r, column=1, sticky="w", pady=2)
             cb.bind("<FocusIn>", lambda e, k=key: show_desc(k))
             cb.bind("<MouseWheel>", _on_mousewheel)
+            cb.bind("<space>", lambda e, w=cb: (w.invoke(), "break")[1])
+            _bind_focus_keys(cb)
+            focus_widgets.append(cb)
         else:
             sv = tk.StringVar(value=initial_value(spec))
             vars_str[key] = sv
@@ -471,13 +599,30 @@ def _run_gui(env_path: str) -> int:
             ent.grid(row=r, column=1, sticky="w", pady=2)
             ent.bind("<FocusIn>", lambda e, k=key: show_desc(k))
             ent.bind("<MouseWheel>", _on_mousewheel)
+            _bind_focus_keys(ent)
+            focus_widgets.append(ent)
 
         tk.Button(scroll_frame, text="説明", command=lambda k=key: show_desc(k), width=6).grid(
             row=r, column=2, sticky="w", padx=(8, 0), pady=2
         )
 
-    for idx, spec in enumerate(specs):
-        build_row(idx, spec)
+    row_i = 0
+    prev_section = ""
+    for spec in specs:
+        key = str(spec.get("key") or "")
+        section = _section_title_for_key(key)
+        if section != prev_section:
+            tk.Label(
+                scroll_frame,
+                text=section,
+                font=("Meiryo", 10, "bold"),
+                anchor="w",
+            ).grid(row=row_i, column=0, columnspan=3, sticky="w", pady=(10, 4))
+            row_i += 1
+            prev_section = section
+
+        build_row(row_i, spec)
+        row_i += 1
 
     btns = tk.Frame(right)
     btns.pack(fill="x", pady=(6, 6))

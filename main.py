@@ -1207,15 +1207,18 @@ def notify_watchlist_change(watchlist: Dict[str, Any], edinet_company_index: Lis
         try:
             event_queue.put_nowait({"kind": "watch", "count": 0})
             event_queue.put_nowait({"kind": "watching_symbols", "text": "-"})
+            event_queue.put_nowait({"kind": "watching_symbols_full", "symbols": []})
         except Exception:
             pass
         return
     
     symbols_info = []
+    symbols_full: List[Tuple[str, str]] = []
     for sym in sorted(watchlist.keys()):
         state = watchlist[sym]
         company_name = str(state.get("company_name") or "").strip() or get_company_name_from_symbol(sym, edinet_company_index)
         source = state.get("source", "")
+        symbols_full.append((sym, company_name or str(source or "").strip()))
         if company_name:
             symbols_info.append(f"{sym}({company_name[:8]})" if len(company_name) > 8 else f"{sym}({company_name})")
         else:
@@ -1228,6 +1231,7 @@ def notify_watchlist_change(watchlist: Dict[str, Any], edinet_company_index: Lis
     try:
         event_queue.put_nowait({"kind": "watch", "count": len(watchlist)})
         event_queue.put_nowait({"kind": "watching_symbols", "text": text})
+        event_queue.put_nowait({"kind": "watching_symbols_full", "symbols": symbols_full})
     except Exception:
         pass
 
@@ -2318,6 +2322,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
 
     # メインスレッドからのイベント通知を監視するループ
     def poll_queue():
+        nonlocal current_watching_symbols
         try:
             while True:
                 msg = event_queue.get_nowait()
@@ -2326,7 +2331,6 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                     vars_["watch"].set(f"監視銘柄数: {msg.get('count', 0)}")
                 elif kind == "watching_symbols":
                     # 銘柄リストを保存
-                    nonlocal current_watching_symbols
                     text = msg.get('text', '-')
                     vars_["watching_symbols"].set(f"監視中銘柄: {text}")
                     # 銘柄コードと名前のリストを構築
@@ -2341,12 +2345,23 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                             else:
                                 symbols_list.append((item.strip(), ''))
                     current_watching_symbols = symbols_list
+                elif kind == "watching_symbols_full":
+                    syms = msg.get("symbols")
+                    if not isinstance(syms, list):
+                        syms = []
+                    normalized: List[Tuple[str, str]] = []
+                    for it in syms:
+                        if isinstance(it, (list, tuple)) and len(it) >= 2:
+                            normalized.append((str(it[0]), str(it[1])))
+                        elif isinstance(it, dict):
+                            normalized.append((str(it.get("symbol") or ""), str(it.get("name") or "")))
+                    current_watching_symbols = [(s.strip(), n.strip()) for s, n in normalized if str(s or "").strip()]
                 elif kind == "tdnet":
                     vars_["tdnet"].set(f"TDnet: {msg.get('text', '-')}" )
                 elif kind == "edinet":
-                    vars_["edinet"].set(f"EDINET: 最終チェック {msg.get('text', '-')}")
+                    vars_["edinet"].set(f"EDINET: 最終チェック {msg.get('text', '-')}" )
                 elif kind == "news":
-                    vars_["news"].set(f"NEWS: 最終チェック {msg.get('text', '-')}")
+                    vars_["news"].set(f"NEWS: 最終チェック {msg.get('text', '-')}" )
                 elif kind == "kabus":
                     vars_["kabus"].set(f"KabuStation: {msg.get('text', '-')}" )
                 elif kind == "event":
@@ -3212,6 +3227,8 @@ def main():
                     event_queue.put_nowait({"kind": "watch", "count": len(watchlist)})
                 except Exception:
                     pass
+
+                notify_watchlist_change(watchlist, edinet_company_index, event_queue)
 
                 # トークン取得または再取得
                 if kabus_token is None:
