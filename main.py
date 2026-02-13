@@ -14,6 +14,7 @@ import math
 import shutil
 import zipfile
 import re
+import builtins
 from typing import Optional, Tuple, Dict, Any, List
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -1860,7 +1861,7 @@ def build_cash_order(symbol: str, side: str, qty: int, order_type: str, limit_pr
         "SecurityType": 1,
         "Side": "2" if side == "buy" else "1",
         "CashMargin": 1,
-        "DelivType": 2 if side == "buy" else 0,
+        "DelivType": 2,
         "FundType": "AA" if side == "buy" else "  ",
         "AccountType": 2,
         "Qty": int(qty),
@@ -2246,7 +2247,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Radiobutton(r4, text="指値(±%)", variable=v_order_type, value="limit_pct", command=push_settings).pack(side="left")
     tk.Label(r4, text="%", width=2).pack(side="left", padx=(10, 0))
     tk.Entry(r4, textvariable=v_limit_pct, width=6).pack(side="left")
-    tk.Button(r4, text="反映", command=push_settings).pack(side="left", padx=4)
+    tk.Button(r4, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
 
     r5 = tk.Frame(frm)
     r5.pack(fill="x", padx=6, pady=4)
@@ -2254,7 +2255,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Entry(r5, textvariable=v_qty, width=8).pack(side="left")
     tk.Label(r5, text="出来高倍率", width=10, anchor="e").pack(side="left", padx=(12, 0))
     tk.Entry(r5, textvariable=v_vol_mult, width=6).pack(side="left")
-    tk.Button(r5, text="反映", command=push_settings).pack(side="left", padx=4)
+    tk.Button(r5, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
 
     r6 = tk.Frame(frm)
     r6.pack(fill="x", padx=6, pady=4)
@@ -2279,7 +2280,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Entry(r6c, textvariable=v_stag_vol_mult, width=6).pack(side="left")
     tk.Label(r6c, text="連続", width=6, anchor="e").pack(side="left", padx=(10, 0))
     tk.Entry(r6c, textvariable=v_stag_hits, width=4).pack(side="left")
-    tk.Button(r6c, text="反映", command=push_settings).pack(side="left", padx=4)
+    tk.Button(r6c, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
 
     r7 = tk.Frame(frm)
     r7.pack(fill="x", padx=6, pady=8)
@@ -2318,7 +2319,88 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         except Exception:
             pass
 
-    tk.Button(mw_row, text="反映", command=on_apply_manual_watch).pack(side="left", padx=4)
+    tk.Button(mw_row, text="反映", command=lambda: _on_apply_manual_watch_with_log()).pack(side="left", padx=4)
+
+    # --- 実行ログエリア（反映ボタン操作の結果表示用） ---
+    exec_log_frm = tk.LabelFrame(container, text="実行ログ")
+    exec_log_frm.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+    exec_log_text = tk.Text(exec_log_frm, height=6, wrap="word", state="disabled",
+                            font=("MS Gothic", 9), bg="#f8f8f0")
+    exec_log_sb = tk.Scrollbar(exec_log_frm, orient="vertical", command=exec_log_text.yview)
+    exec_log_text.configure(yscrollcommand=exec_log_sb.set)
+    exec_log_sb.pack(side="right", fill="y")
+    exec_log_text.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+
+    # --- コンソールログエリア（メインスレッドのprint出力を表示） ---
+    console_log_frm = tk.LabelFrame(container, text="コンソールログ")
+    console_log_frm.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+    console_log_text = tk.Text(console_log_frm, height=10, wrap="word", state="disabled",
+                               font=("MS Gothic", 9), bg="#1e1e1e", fg="#d4d4d4",
+                               insertbackground="#d4d4d4")
+    console_log_sb = tk.Scrollbar(console_log_frm, orient="vertical", command=console_log_text.yview)
+    console_log_text.configure(yscrollcommand=console_log_sb.set)
+    console_log_sb.pack(side="right", fill="y")
+    console_log_text.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+
+    LOG_MAX_LINES = 200
+
+    def _append_log(widget, line):
+        widget.configure(state="normal")
+        widget.insert("end", line if line.endswith("\n") else line + "\n")
+        total = int(widget.index("end-1c").split(".")[0])
+        if total > LOG_MAX_LINES:
+            widget.delete("1.0", f"{total - LOG_MAX_LINES + 1}.0")
+        widget.configure(state="disabled")
+        widget.see("end")
+
+    def _append_exec_log(line):
+        _append_log(exec_log_text, line)
+
+    def _append_console_log(line):
+        _append_log(console_log_text, line)
+
+    def _deselect_all_entries():
+        try:
+            root.focus_set()
+        except Exception:
+            pass
+
+    def _on_push_settings_with_log():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        changes = []
+        changes.append(f"モード={v_mode.get()}")
+        changes.append(f"売買={v_side_mode.get()}")
+        changes.append(f"取引区分={v_cash_margin.get()}")
+        changes.append(f"注文種類={v_order_type.get()}")
+        changes.append(f"指値%={v_limit_pct.get()}")
+        changes.append(f"数量={v_qty.get()}")
+        changes.append(f"出来高倍率={v_vol_mult.get()}")
+        changes.append(f"DRY_RUN={'ON' if v_dry.get() else 'OFF'}")
+        changes.append(f"確認ダイアログ={'ON' if v_confirm.get() else 'OFF'}")
+        changes.append(f"自動決済={'ON' if v_auto_exit.get() else 'OFF'}")
+        changes.append(f"利確={v_profit_yen.get()}")
+        changes.append(f"損切={v_stoploss_yen.get()}")
+        changes.append(f"停滞秒={v_stag_secs.get()}")
+        changes.append(f"値幅%={v_stag_price_pct.get()}")
+        changes.append(f"出来高倍={v_stag_vol_mult.get()}")
+        changes.append(f"連続={v_stag_hits.get()}")
+        push_settings()
+        _append_exec_log(f"[{ts}] 注文設定を反映しました: {', '.join(changes)}")
+        _deselect_all_entries()
+        messagebox.showinfo("反映完了", "注文設定の反映が完了しました。")
+
+    def _on_apply_manual_watch_with_log():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        syms = []
+        for i, e in enumerate(mw_entries):
+            v = e.get().strip()
+            if v:
+                syms.append(f"スロット{i+1}={v.upper()}")
+        on_apply_manual_watch()
+        desc = ", ".join(syms) if syms else "(全スロット空)"
+        _append_exec_log(f"[{ts}] 手動監視銘柄を反映しました: {desc}")
+        _deselect_all_entries()
+        messagebox.showinfo("反映完了", "手動監視銘柄の反映が完了しました。")
 
     # メインスレッドからのイベント通知を監視するループ
     def poll_queue():
@@ -2370,6 +2452,8 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                         last_symbol_var.set(str(msg.get("symbol")))
                     if msg.get("price") is not None:
                         last_price_var.set(str(msg.get("price")))
+                elif kind == "console_log":
+                    _append_console_log(str(msg.get("text", "")))
                 elif kind == "manual_watch_invalid":
                     try:
                         idx = int(msg.get("slot"))
@@ -2761,6 +2845,23 @@ def main():
     if ENABLE_GUI:
         t = threading.Thread(target=start_gui, args=(event_queue, command_queue), daemon=True)
         t.start()
+
+    # printの出力をGUIコンソールログにも転送するラッパー
+    _original_print = builtins.print
+    def _gui_print(*args, **kwargs):
+        _original_print(*args, **kwargs)
+        try:
+            import io
+            buf = io.StringIO()
+            kwargs_copy = dict(kwargs)
+            kwargs_copy["file"] = buf
+            _original_print(*args, **kwargs_copy)
+            text = buf.getvalue().rstrip("\n")
+            if text and ENABLE_GUI:
+                event_queue.put_nowait({"kind": "console_log", "text": text})
+        except Exception:
+            pass
+    builtins.print = _gui_print
 
     consecutive_errors = 0
     poll_seconds = BASE_POLL_SECONDS
