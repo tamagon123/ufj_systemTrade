@@ -281,6 +281,24 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "自動発注トリガーの出来高倍率。小さいほど発注しやすく、誤発注リスクも増えます。",
     },
     {
+        "key": "ORDER_PRICE_MIN",
+        "default": "0",
+        "type": "float",
+        "desc": "発注対象の株価下限（円）。0で制限なし。設定すると、この価格未満の銘柄には発注しません（決済注文は除く）。",
+    },
+    {
+        "key": "ORDER_PRICE_MAX",
+        "default": "0",
+        "type": "float",
+        "desc": "発注対象の株価上限（円）。0で制限なし。設定すると、この価格を超える銘柄には発注しません（決済注文は除く）。",
+    },
+    {
+        "key": "ORDER_BASE_VOLUME_MIN",
+        "default": "0",
+        "type": "float",
+        "desc": "発注対象の出来高下限（株）。0で制限なし。設定すると、発注判断時点の累積出来高がこの値未満の銘柄には自動発注しません。推奨: 50000〜100000。",
+    },
+    {
         "key": "ORDER_MIN_PRICE_PCT",
         "default": "0.3",
         "type": "float",

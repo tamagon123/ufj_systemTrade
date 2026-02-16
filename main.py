@@ -163,6 +163,9 @@ ORDER_QTY = int(os.environ.get("ORDER_QTY", "100")) # 注文数量
 ORDER_DRY_RUN = (os.environ.get("ORDER_DRY_RUN") or "1").strip() in {"1", "true", "True"} # Trueなら実際には発注しない
 ORDER_CONFIRM = (os.environ.get("ORDER_CONFIRM") or "1").strip() in {"1", "true", "True"} # 発注前に確認ダイアログを出すか
 ORDER_VOLUME_MULTIPLIER = float(os.environ.get("ORDER_VOLUME_MULTIPLIER", "3")) # 自動発注トリガーとなる出来高倍率
+ORDER_PRICE_MIN = float(os.environ.get("ORDER_PRICE_MIN", "0"))   # 発注対象の株価下限（0=制限なし）
+ORDER_PRICE_MAX = float(os.environ.get("ORDER_PRICE_MAX", "0"))   # 発注対象の株価上限（0=制限なし）
+ORDER_BASE_VOLUME_MIN = float(os.environ.get("ORDER_BASE_VOLUME_MIN", "0"))  # 発注対象の出来高下限（0=制限なし）
 
 # 自動決済設定
 AUTO_EXIT_ENABLE = (os.environ.get("AUTO_EXIT_ENABLE") or "0").strip() in {"1", "true", "True"}
@@ -385,6 +388,21 @@ NEWS_LOG_FIELDNAMES = [
     "published_ts",
 ]
 
+ORDER_LOG_FIELDNAMES = [
+    "datetime",
+    "symbol",
+    "side",
+    "qty",
+    "order_type",
+    "limit_price",
+    "cash_margin",
+    "reason",
+    "dry_run",
+    "status",
+    "result",
+    "payload",
+]
+
 # 日本標準時のタイムゾーン定義
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
@@ -527,6 +545,24 @@ def append_news_log(row: Dict[str, Any], date_yyyymmdd: str) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow({k: row.get(k, "") for k in NEWS_LOG_FIELDNAMES})
+
+def append_order_log(row: Dict[str, Any], date_yyyymmdd: str) -> None:
+    """発注の実行ログ（リクエスト内容・APIレスポンス）をCSVに保存する関数。
+
+    Args:
+        row (Dict[str, Any]): 発注データ。
+        date_yyyymmdd (str): 日付文字列。
+    """
+    date_dir = os.path.join(LOG_DIR, date_yyyymmdd)
+    os.makedirs(date_dir, exist_ok=True)
+    log_path = os.path.join(date_dir, f"order_{date_yyyymmdd}.csv")
+    file_exists = os.path.exists(log_path)
+
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=ORDER_LOG_FIELDNAMES)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in ORDER_LOG_FIELDNAMES})
 
 def make_unique_key(item: Dict[str, str]) -> str:
     """開示情報の重複チェック用ユニークキーを生成する関数。
@@ -1713,6 +1749,12 @@ def apply_order_settings(order_settings: Dict[str, Any], cmd: Dict[str, Any]) ->
         order_settings["confirm"] = bool(cmd.get("confirm"))
     if "volume_mult" in cmd:
         order_settings["volume_mult"] = _to_float(cmd.get("volume_mult"), float(order_settings.get("volume_mult") or 0.0))
+    if "price_min" in cmd:
+        order_settings["price_min"] = _to_float(cmd.get("price_min"), float(order_settings.get("price_min") or 0.0))
+    if "price_max" in cmd:
+        order_settings["price_max"] = _to_float(cmd.get("price_max"), float(order_settings.get("price_max") or 0.0))
+    if "base_volume_min" in cmd:
+        order_settings["base_volume_min"] = _to_float(cmd.get("base_volume_min"), float(order_settings.get("base_volume_min") or 0.0))
 
     if "auto_exit" in cmd:
         order_settings["auto_exit"] = bool(cmd.get("auto_exit"))
@@ -1769,6 +1811,19 @@ def try_place_order(
     if qty <= 0:
         return
 
+    is_closing = (sd == "sell" and str(settings.get("cash_margin") or "").strip().lower() == "margin_close")
+    is_exit = "auto_exit" in str(reason or "")
+    if not is_closing and not is_exit:
+        price_min = float(settings.get("price_min") or 0)
+        price_max = float(settings.get("price_max") or 0)
+        cp = float(current_price)
+        if price_min > 0 and cp < price_min:
+            print(f"[ORDER] skip {sym}: price {cp} < price_min {price_min}")
+            return
+        if price_max > 0 and cp > price_max:
+            print(f"[ORDER] skip {sym}: price {cp} > price_max {price_max}")
+            return
+
     order_type = str(settings.get("order_type") or "market").strip().lower()
     limit_pct = float(settings.get("limit_pct") or 0.0)
     dry_run = bool(settings.get("dry_run"))
@@ -1779,7 +1834,7 @@ def try_place_order(
     if order_type in {"limit_pct", "limit", "limitpercent"}:
         limit_price = calc_limit_price(float(current_price), sd, float(limit_pct))
 
-    margin_trade_type = int(settings.get("margin_trade_type") or 2)
+    margin_trade_type = int(settings.get("margin_trade_type") or 3)
     if cash_margin == "margin_close":
         order = build_margin_close_order(sym, sd, qty, "limit_pct" if limit_price is not None else "market", limit_price, margin_trade_type=margin_trade_type)
     elif cash_margin == "margin":
@@ -1788,6 +1843,19 @@ def try_place_order(
         order = build_cash_order(sym, sd, qty, "limit_pct" if limit_price is not None else "market", limit_price)
 
     order_desc = f"{sd} {sym} qty={qty} type={order_type} price={limit_price if limit_price is not None else 'MKT'} ({reason})"
+
+    _order_log_date = datetime.datetime.now().strftime("%Y%m%d")
+    _order_log_base = {
+        "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+        "symbol": sym,
+        "side": sd,
+        "qty": qty,
+        "order_type": order_type,
+        "limit_price": limit_price if limit_price is not None else "MKT",
+        "cash_margin": cash_margin,
+        "reason": reason,
+        "dry_run": dry_run,
+    }
 
     if confirm:
         ok = True
@@ -1810,6 +1878,7 @@ def try_place_order(
                 event_queue.put_nowait({"kind": "event", "text": f"order canceled {sym}", "symbol": sym, "price": current_price})
             except Exception:
                 pass
+            append_order_log({**_order_log_base, "status": "", "result": "canceled", "payload": ""}, _order_log_date)
             return
 
     if dry_run:
@@ -1818,6 +1887,7 @@ def try_place_order(
             event_queue.put_nowait({"kind": "event", "text": f"DRY_RUN {order_desc}", "symbol": sym, "price": current_price})
         except Exception:
             pass
+        append_order_log({**_order_log_base, "status": "", "result": "dry_run", "payload": ""}, _order_log_date)
         return
 
     if not token:
@@ -1826,6 +1896,7 @@ def try_place_order(
             event_queue.put_nowait({"kind": "event", "text": f"order skip (no token) {sym}", "symbol": sym, "price": current_price})
         except Exception:
             pass
+        append_order_log({**_order_log_base, "status": "", "result": "no_token", "payload": ""}, _order_log_date)
         return
 
     try:
@@ -1835,14 +1906,18 @@ def try_place_order(
             event_queue.put_nowait({"kind": "event", "text": f"order status={status} {sym}", "symbol": sym, "price": current_price})
         except Exception:
             pass
-        if status != 200:
+        if status == 200:
+            append_order_log({**_order_log_base, "status": status, "result": "ok", "payload": payload}, _order_log_date)
+        else:
             print(f"[ORDER] sendorder failed payload={payload}")
+            append_order_log({**_order_log_base, "status": status, "result": "failed", "payload": payload}, _order_log_date)
     except Exception as e:
         print(f"[ORDER] sendorder error: {e} ({order_desc})")
         try:
             event_queue.put_nowait({"kind": "event", "text": f"order error {sym}", "symbol": sym, "price": current_price})
         except Exception:
             pass
+        append_order_log({**_order_log_base, "status": "", "result": "error", "payload": str(e)}, _order_log_date)
 
 
 def build_cash_order(symbol: str, side: str, qty: int, order_type: str, limit_price: Optional[float]) -> Dict[str, Any]:
@@ -1897,7 +1972,7 @@ def build_margin_new_order(symbol: str, side: str, qty: int, order_type: str, li
         "SecurityType": 1,
         "Side": "2" if side == "buy" else "1",
         "CashMargin": 2,
-        "MarginTradeType": 2,
+        "MarginTradeType": 3,
         "DelivType": 0,
         "AccountType": 4,
         "Qty": int(qty),
@@ -1911,7 +1986,7 @@ def build_margin_new_order(symbol: str, side: str, qty: int, order_type: str, li
         obj["Price"] = float(limit_price or 0)
     return obj
 
-def build_margin_close_order(symbol: str, side: str, qty: int, order_type: str, limit_price: Optional[float], margin_trade_type: int = 2) -> Dict[str, Any]:
+def build_margin_close_order(symbol: str, side: str, qty: int, order_type: str, limit_price: Optional[float], margin_trade_type: int = 3) -> Dict[str, Any]:
     """信用返済取引の注文パラメータ辞書を構築するヘルパー関数。
 
     Args:
@@ -2208,6 +2283,9 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     v_dry = tk.IntVar(value=1 if ORDER_DRY_RUN else 0)
     v_confirm = tk.IntVar(value=1 if ORDER_CONFIRM else 0)
     v_vol_mult = tk.StringVar(value=str(ORDER_VOLUME_MULTIPLIER))
+    v_price_min = tk.StringVar(value=str(ORDER_PRICE_MIN))
+    v_price_max = tk.StringVar(value=str(ORDER_PRICE_MAX))
+    v_base_vol_min = tk.StringVar(value=str(ORDER_BASE_VOLUME_MIN))
 
     v_auto_exit = tk.IntVar(value=1 if AUTO_EXIT_ENABLE else 0)
     v_profit_yen = tk.StringVar(value=str(AUTO_EXIT_PROFIT_YEN_PER_100))
@@ -2235,6 +2313,9 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                     "dry_run": bool(v_dry.get()),
                     "confirm": bool(v_confirm.get()),
                     "volume_mult": v_vol_mult.get(),
+                    "price_min": v_price_min.get(),
+                    "price_max": v_price_max.get(),
+                    "base_volume_min": v_base_vol_min.get(),
                     "auto_exit": bool(v_auto_exit.get()),
                     "profit_yen_per_100": v_profit_yen.get(),
                     "stoploss_yen_per_100": v_stoploss_yen.get(),
@@ -2295,6 +2376,23 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Label(r5, text="出来高倍率", width=10, anchor="e").pack(side="left", padx=(12, 0))
     tk.Entry(r5, textvariable=v_vol_mult, width=6).pack(side="left")
     tk.Button(r5, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
+
+    r5b = tk.Frame(frm)
+    r5b.pack(fill="x", padx=6, pady=4)
+    tk.Label(r5b, text="株価値幅", width=14, anchor="w").pack(side="left")
+    tk.Label(r5b, text="下限", width=4, anchor="e").pack(side="left")
+    tk.Entry(r5b, textvariable=v_price_min, width=8).pack(side="left")
+    tk.Label(r5b, text="上限", width=4, anchor="e").pack(side="left", padx=(12, 0))
+    tk.Entry(r5b, textvariable=v_price_max, width=8).pack(side="left")
+    tk.Label(r5b, text="(0=制限なし)", width=12, anchor="w").pack(side="left", padx=(6, 0))
+    tk.Button(r5b, text="反映", command=push_settings).pack(side="left", padx=4)
+
+    r5c = tk.Frame(frm)
+    r5c.pack(fill="x", padx=6, pady=4)
+    tk.Label(r5c, text="出来高下限", width=14, anchor="w").pack(side="left")
+    tk.Entry(r5c, textvariable=v_base_vol_min, width=10).pack(side="left")
+    tk.Label(r5c, text="(急増前の出来高, 0=制限なし)", anchor="w").pack(side="left", padx=(6, 0))
+    tk.Button(r5c, text="反映", command=push_settings).pack(side="left", padx=4)
 
     r6 = tk.Frame(frm)
     r6.pack(fill="x", padx=6, pady=4)
@@ -2752,7 +2850,7 @@ def archive_old_logs(keep_days: int = 2) -> None:
             moved_any = False
 
             # 旧形式でルートにあるログCSVが残っている場合は日付ディレクトリへ寄せる
-            for fn in (f"tdnet_{yyyymmdd}.csv", f"trade_events_{yyyymmdd}.csv", f"edinet_{yyyymmdd}.csv", f"news_{yyyymmdd}.csv"):
+            for fn in (f"tdnet_{yyyymmdd}.csv", f"trade_events_{yyyymmdd}.csv", f"edinet_{yyyymmdd}.csv", f"news_{yyyymmdd}.csv", f"order_{yyyymmdd}.csv"):
                 src = os.path.join(LOG_DIR, fn)
                 if os.path.exists(src):
                     os.makedirs(date_dir, exist_ok=True)
@@ -2866,6 +2964,9 @@ def main():
         "dry_run": bool(ORDER_DRY_RUN),
         "confirm": bool(ORDER_CONFIRM),
         "volume_mult": float(ORDER_VOLUME_MULTIPLIER),
+        "price_min": float(ORDER_PRICE_MIN),
+        "price_max": float(ORDER_PRICE_MAX),
+        "base_volume_min": float(ORDER_BASE_VOLUME_MIN),
         "auto_exit": bool(AUTO_EXIT_ENABLE),
         "profit_yen_per_100": float(AUTO_EXIT_PROFIT_YEN_PER_100),
         "stoploss_yen_per_100": float(AUTO_EXIT_STOPLOSS_YEN_PER_100),
@@ -3595,140 +3696,6 @@ def main():
                         state["next_board_at"] = float(now) + float(get_watch_poll_seconds()) + random.uniform(0.0, 0.3)
                         watchlist[symbol] = state
 
-                        if kabus_token and bool(order_settings.get("auto_exit")) and now >= next_positions_check_at:
-                            next_positions_check_at = now + 5.0
-                            try:
-                                st_pos, payload_pos = kabus_get_positions(kabus_token, product=0, symbol="", side="", addinfo=False)
-                                if st_pos == 200 and isinstance(payload_pos, list):
-                                    new_held: Dict[str, Dict[str, Any]] = {}
-                                    for p in payload_pos:
-                                        if not isinstance(p, dict):
-                                            continue
-
-                                        sym = str(p.get("Symbol") or p.get("symbol") or "").strip()
-                                        if not sym:
-                                            continue
-
-                                        avg = None
-                                        for k in ("Price", "HoldPrice", "AveragePrice", "AvgPrice"):
-                                            v = p.get(k)
-                                            if isinstance(v, (int, float)):
-                                                avg = float(v)
-                                                break
-
-                                        qty = None
-                                        for k in ("LeavesQty", "HoldQty", "Qty"):
-                                            v = p.get(k)
-                                            if isinstance(v, (int, float)):
-                                                qty = int(v)
-                                                break
-
-                                        side_raw = p.get("Side")
-                                        side_p = "buy" if side_raw in (2, "2", "buy", "BUY") else ("sell" if side_raw in (1, "1", "sell", "SELL") else "")
-
-                                        cm = p.get("CashMargin")
-                                        cm_i = int(cm) if isinstance(cm, (int, float)) else None
-
-                                        prev = held_positions.get(sym) or {}
-                                        new_held[sym] = {
-                                            **prev,
-                                            "avg_price": avg,
-                                            "qty": qty,
-                                            "side": side_p,
-                                            "cash_margin": cm_i,
-                                            "seen_at": float(now),
-                                            "first_seen_at": float(prev.get("first_seen_at") or now),
-                                        }
-
-                                        if sym not in watchlist:
-                                            watchlist[sym] = {
-                                                "tdnet_key": "",
-                                                "added_at": float(now),
-                                                "baseline_price": None,
-                                                "baseline_volume": None,
-                                                "last_volume": None,
-                                                "last_vol_at": None,
-                                                "vol_hist": None,
-                                                "rate_ema": None,
-                                                "next_board_at": 0.0,
-                                                "board_backoff": 0.0,
-                                                "order_hit_streak": 0,
-                                                "triggered_surge": False,
-                                                "triggered_crash": False,
-                                                "triggered_order": False,
-                                                "source": "position",
-                                                "filer_name": "",
-                                                "doc_description": "",
-                                                "watch_window": float(WATCH_WINDOW_SECONDS) * 10.0,
-                                                "stagnation_exit_streak": 0,
-                                                "auto_exit_done": False,
-                                            }
-
-                                    held_positions = new_held
-                            except Exception:
-                                pass
-
-                        if kabus_token and bool(order_settings.get("auto_exit")) and (not state.get("auto_exit_done")):
-                            hp = held_positions.get(symbol) or {}
-                            hp_cm = hp.get("cash_margin")
-                            hp_side = str(hp.get("side") or "").strip().lower()
-                            hp_qty = hp.get("qty")
-                            hp_avg = hp.get("avg_price")
-
-                            is_cash_long = (hp_cm == 1) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
-                            is_margin_long = (hp_cm == 2) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
-                            if is_cash_long or is_margin_long:
-                                profit_target = float(order_settings.get("profit_yen_per_100") or 0.0)
-                                stop_target = float(order_settings.get("stoploss_yen_per_100") or 0.0)
-                                stag_secs = float(order_settings.get("stagnation_seconds") or 0.0)
-                                stag_price = float(order_settings.get("stagnation_price_pct") or 0.0)
-                                stag_vol = float(order_settings.get("stagnation_volume_mult") or 0.0)
-                                stag_hits_need = int(order_settings.get("stagnation_hits") or 1)
-
-                                unit = float(hp_qty) / 100.0
-                                pnl_100 = (((float(price) - float(hp_avg)) * float(hp_qty)) / unit) if unit > 0 else 0.0
-
-                                should_exit = False
-                                exit_reason = ""
-
-                                if profit_target > 0 and pnl_100 >= profit_target:
-                                    should_exit = True
-                                    exit_reason = f"take_profit pnl/100={pnl_100:.0f}"
-                                elif stop_target > 0 and pnl_100 <= (-stop_target):
-                                    should_exit = True
-                                    exit_reason = f"stop_loss pnl/100={pnl_100:.0f}"
-                                else:
-                                    first_seen = float(hp.get("first_seen_at") or now)
-                                    if stag_secs > 0 and (now - first_seen) >= stag_secs and abs(float(price_pct)) < stag_price and float(volume_mult) < stag_vol:
-                                        streak3 = int(state.get("stagnation_exit_streak") or 0) + 1
-                                        state["stagnation_exit_streak"] = streak3
-                                        watchlist[symbol] = state
-                                        if streak3 >= stag_hits_need:
-                                            should_exit = True
-                                            exit_reason = f"stagnation hits={streak3}"
-                                    else:
-                                        if int(state.get("stagnation_exit_streak") or 0) != 0:
-                                            state["stagnation_exit_streak"] = 0
-                                            watchlist[symbol] = state
-
-                                if should_exit:
-                                    state["auto_exit_done"] = True
-                                    watchlist[symbol] = state
-                                    close_settings = dict(order_settings)
-                                    close_settings["cash_margin"] = "margin_close" if is_margin_long else "cash"
-                                    close_settings["order_type"] = "market"
-                                    close_settings["limit_pct"] = 0.0
-                                    close_settings["qty"] = int(hp_qty)
-                                    try_place_order(
-                                        token=kabus_token,
-                                        symbol=symbol,
-                                        side="sell",
-                                        current_price=price,
-                                        settings=close_settings,
-                                        event_queue=event_queue,
-                                        reason=f"auto_exit {exit_reason}",
-                                    )
-
                         # 早期終了判定（値動き・出来高変化が乏しい場合は監視解除）
                         if (
                             WATCH_EARLY_STOP_SECONDS > 0
@@ -3759,26 +3726,59 @@ def main():
                             watchlist.pop(symbol, None)
                             continue
 
+                        # 保有中の銘柄かどうか判定（新規発注抑止用）
+                        _hp_held = held_positions.get(symbol) or {}
+                        _hp_has_position = isinstance(_hp_held.get("qty"), int) and _hp_held["qty"] > 0
+
                         # 手動注文のリクエスト処理
                         if pending_manual_symbol and pending_manual_symbol == symbol:
                             pending_manual_symbol = None
-                            side = decide_side_by_trend(price_pct) # トレンド判定（外部関数想定）
-                            if side and should_place_side(str(order_settings.get("side_mode")), side): # 設定との照合
-                                try_place_order(
-                                    token=kabus_token,
-                                    symbol=symbol,
-                                    side=side,
-                                    current_price=price,
-                                    settings=order_settings,
-                                    event_queue=event_queue,
-                                    reason="manual",
-                                )
+                            if _hp_has_position:
+                                print(f"[ORDER] 保有中のため新規発注スキップ: {symbol}")
+                                try:
+                                    event_queue.put_nowait({"kind": "event", "text": f"保有中スキップ {symbol}", "symbol": symbol, "price": price})
+                                except Exception:
+                                    pass
+                            else:
+                                side = decide_side_by_trend(price_pct) # トレンド判定（外部関数想定）
+                                if side and should_place_side(str(order_settings.get("side_mode")), side): # 設定との照合
+                                    try_place_order(
+                                        token=kabus_token,
+                                        symbol=symbol,
+                                        side=side,
+                                        current_price=price,
+                                        settings=order_settings,
+                                        event_queue=event_queue,
+                                        reason="manual",
+                                    )
 
-                        # 自動発注ロジック
+                        # 自動発注ロジック（保有中の銘柄は新規発注しない）
+                        _bv_min = float(order_settings.get("base_volume_min") or 0)
+                        _vol_mult_ok = volume_mult >= float(order_settings.get("volume_mult") or 0)
+                        _bv_ok = (_bv_min <= 0 or float(volume) >= _bv_min)
                         if (
                             str(order_settings.get("mode")).lower() == "auto"
                             and (not state.get("triggered_order"))
-                            and volume_mult >= float(order_settings.get("volume_mult") or 0)
+                            and (not _hp_has_position)
+                            and _vol_mult_ok
+                            and _bv_ok
+                        ):
+                            pass  # 条件クリア — 下のブロックで発注判定へ
+                        elif (
+                            str(order_settings.get("mode")).lower() == "auto"
+                            and (not state.get("triggered_order"))
+                            and (not _hp_has_position)
+                            and _vol_mult_ok
+                            and (not _bv_ok)
+                        ):
+                            print(f"[ORDER] skip {symbol}: volume {volume:.0f} < base_volume_min {_bv_min:.0f}")
+
+                        if (
+                            str(order_settings.get("mode")).lower() == "auto"
+                            and (not state.get("triggered_order"))
+                            and (not _hp_has_position)
+                            and _vol_mult_ok
+                            and _bv_ok
                         ):
                             side = decide_side_by_trend(price_pct)
                             # 価格変動率フィルタと売買フィルタの確認
@@ -3916,6 +3916,166 @@ def main():
                             except Exception:
                                 pass
 
+            # -------------------------------------------------------------------
+            # 保有ポジション定期チェック＋自動決済（watchlist非依存）
+            # -------------------------------------------------------------------
+            now = time.time()
+            if kabus_token is None and now >= next_positions_check_at:
+                try:
+                    kabus_token = kabus_get_token()
+                except Exception:
+                    kabus_token = None
+            if kabus_token and now >= next_positions_check_at:
+                next_positions_check_at = now + 5.0
+                try:
+                    st_pos, payload_pos = kabus_get_positions(kabus_token, product=0, symbol="", side="", addinfo=True)
+                    if st_pos == 200 and isinstance(payload_pos, list):
+                        new_held: Dict[str, Dict[str, Any]] = {}
+                        for p in payload_pos:
+                            if not isinstance(p, dict):
+                                continue
+                            sym = str(p.get("Symbol") or p.get("symbol") or "").strip()
+                            if not sym:
+                                continue
+
+                            avg = None
+                            for k in ("Price", "HoldPrice", "AveragePrice", "AvgPrice"):
+                                v = p.get(k)
+                                if isinstance(v, (int, float)):
+                                    avg = float(v)
+                                    break
+
+                            qty = None
+                            for k in ("LeavesQty", "HoldQty", "Qty"):
+                                v = p.get(k)
+                                if isinstance(v, (int, float)):
+                                    qty = int(v)
+                                    break
+
+                            side_raw = p.get("Side")
+                            side_p = "buy" if side_raw in (2, "2", "buy", "BUY") else ("sell" if side_raw in (1, "1", "sell", "SELL") else "")
+
+                            mtt = p.get("MarginTradeType")
+                            try:
+                                mtt_i = int(mtt) if mtt is not None else None
+                            except (ValueError, TypeError):
+                                mtt_i = None
+                            cm_i = 1 if mtt_i is None else 2
+
+                            cur_price = None
+                            for k in ("CurrentPrice", "currentPrice"):
+                                v = p.get(k)
+                                if isinstance(v, (int, float)):
+                                    cur_price = float(v)
+                                    break
+
+                            prev = held_positions.get(sym) or {}
+                            new_held[sym] = {
+                                **prev,
+                                "avg_price": avg,
+                                "qty": qty,
+                                "side": side_p,
+                                "cash_margin": cm_i,
+                                "margin_trade_type": mtt_i,
+                                "current_price": cur_price,
+                                "seen_at": float(now),
+                                "first_seen_at": float(prev.get("first_seen_at") or now),
+                                "stagnation_exit_streak": int(prev.get("stagnation_exit_streak") or 0),
+                                "auto_exit_done": bool(prev.get("auto_exit_done")),
+                            }
+
+                        held_positions = new_held
+                except Exception:
+                    pass
+
+                # 自動決済判定（各保有銘柄について）
+                if bool(order_settings.get("auto_exit")):
+                    for hp_sym, hp in list(held_positions.items()):
+                        if hp.get("auto_exit_done"):
+                            continue
+                        hp_cm = hp.get("cash_margin")
+                        hp_side = str(hp.get("side") or "").strip().lower()
+                        hp_qty = hp.get("qty")
+                        hp_avg = hp.get("avg_price")
+
+                        is_cash_long = (hp_cm == 1) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
+                        is_margin_long = (hp_cm == 2) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
+                        is_margin_short = (hp_cm == 2) and hp_side == "sell" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
+                        if not (is_cash_long or is_margin_long or is_margin_short):
+                            continue
+
+                        # 現在値の取得: addinfo=True で取得済みの CurrentPrice を優先、なければ板情報から取得
+                        cp = hp.get("current_price")
+                        if cp is None or cp <= 0:
+                            try:
+                                st_b, board_b = kabus_get_board(hp_sym, kabus_token)
+                                if st_b == 200 and isinstance(board_b, dict):
+                                    bp, _ = extract_price_volume(board_b)
+                                    if bp is not None:
+                                        cp = float(bp)
+                            except Exception:
+                                pass
+                        if cp is None or cp <= 0:
+                            continue
+
+                        profit_target = float(order_settings.get("profit_yen_per_100") or 0.0)
+                        stop_target = float(order_settings.get("stoploss_yen_per_100") or 0.0)
+                        stag_secs = float(order_settings.get("stagnation_seconds") or 0.0)
+                        stag_hits_need = int(order_settings.get("stagnation_hits") or 1)
+
+                        unit = float(hp_qty) / 100.0
+                        if is_margin_short:
+                            pnl_100 = (((float(hp_avg) - cp) * float(hp_qty)) / unit) if unit > 0 else 0.0
+                        else:
+                            pnl_100 = (((cp - float(hp_avg)) * float(hp_qty)) / unit) if unit > 0 else 0.0
+
+                        print(f"[POS] {hp_sym} side={hp_side} avg={hp_avg} cur={cp:.1f} pnl/100={pnl_100:.0f}")
+
+                        should_exit = False
+                        exit_reason = ""
+
+                        if profit_target > 0 and pnl_100 >= profit_target:
+                            should_exit = True
+                            exit_reason = f"take_profit pnl/100={pnl_100:.0f}"
+                        elif stop_target > 0 and pnl_100 <= (-stop_target):
+                            should_exit = True
+                            exit_reason = f"stop_loss pnl/100={pnl_100:.0f}"
+                        else:
+                            first_seen = float(hp.get("first_seen_at") or now)
+                            if stag_secs > 0 and (now - first_seen) >= stag_secs:
+                                streak3 = int(hp.get("stagnation_exit_streak") or 0) + 1
+                                hp["stagnation_exit_streak"] = streak3
+                                held_positions[hp_sym] = hp
+                                if streak3 >= stag_hits_need:
+                                    should_exit = True
+                                    exit_reason = f"stagnation hits={streak3}"
+                            else:
+                                if int(hp.get("stagnation_exit_streak") or 0) != 0:
+                                    hp["stagnation_exit_streak"] = 0
+                                    held_positions[hp_sym] = hp
+
+                        if should_exit:
+                            hp["auto_exit_done"] = True
+                            held_positions[hp_sym] = hp
+                            close_settings = dict(order_settings)
+                            close_settings["cash_margin"] = "margin_close" if (is_margin_long or is_margin_short) else "cash"
+                            close_settings["order_type"] = "market"
+                            close_settings["limit_pct"] = 0.0
+                            close_settings["qty"] = int(hp_qty)
+                            hp_mtt = hp.get("margin_trade_type")
+                            if hp_mtt is not None:
+                                close_settings["margin_trade_type"] = int(hp_mtt)
+                            close_side = "buy" if is_margin_short else "sell"
+                            try_place_order(
+                                token=kabus_token,
+                                symbol=hp_sym,
+                                side=close_side,
+                                current_price=cp,
+                                settings=close_settings,
+                                event_queue=event_queue,
+                                reason=f"auto_exit {exit_reason}",
+                            )
+
             time.sleep(0.2) # ビジー待機を防ぐための短いスリープ
 
     except KeyboardInterrupt:
@@ -3952,6 +4112,9 @@ def print_current_env_config(phase_now: str) -> None:
         ("ORDER_DRY_RUN", "1" if ORDER_DRY_RUN else "0"),
         ("ORDER_CONFIRM", "1" if ORDER_CONFIRM else "0"),
         ("ORDER_VOLUME_MULTIPLIER", ORDER_VOLUME_MULTIPLIER),
+        ("ORDER_PRICE_MIN", ORDER_PRICE_MIN),
+        ("ORDER_PRICE_MAX", ORDER_PRICE_MAX),
+        ("ORDER_BASE_VOLUME_MIN", ORDER_BASE_VOLUME_MIN),
         ("ORDER_MIN_PRICE_PCT", ORDER_MIN_PRICE_PCT),
         ("ORDER_CONSECUTIVE_HITS", ORDER_CONSECUTIVE_HITS),
         ("SURGE_PRICE_PCT", SURGE_PRICE_PCT),
