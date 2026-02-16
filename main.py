@@ -14,6 +14,7 @@ import math
 import shutil
 import zipfile
 import re
+import unicodedata
 import builtins
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -147,6 +148,28 @@ SURGE_VOLUME_MULTIPLIER = float(os.environ.get("SURGE_VOLUME_MULTIPLIER", "2")) 
 CRASH_PRICE_PCT = float(os.environ.get("CRASH_PRICE_PCT", "2")) # 価格下落率(%)
 CRASH_VOLUME_MULTIPLIER = float(os.environ.get("CRASH_VOLUME_MULTIPLIER", "2")) # 出来高倍率
 
+# 寄り付き時間帯だけ閾値を高めにするための設定
+OPENING_NOISE_ENABLE = (os.environ.get("OPENING_NOISE_ENABLE") or "1").strip() in {"1", "true", "True"}
+OPENING_NOISE_START_HHMM = (os.environ.get("OPENING_NOISE_START_HHMM") or "09:00").strip()
+OPENING_NOISE_END_HHMM = (os.environ.get("OPENING_NOISE_END_HHMM") or "09:30").strip()
+OPENING_SURGE_PRICE_PCT = float(os.environ.get("OPENING_SURGE_PRICE_PCT", "3"))
+OPENING_SURGE_VOLUME_MULTIPLIER = float(os.environ.get("OPENING_SURGE_VOLUME_MULTIPLIER", "4"))
+OPENING_CRASH_PRICE_PCT = float(os.environ.get("OPENING_CRASH_PRICE_PCT", "3"))
+OPENING_CRASH_VOLUME_MULTIPLIER = float(os.environ.get("OPENING_CRASH_VOLUME_MULTIPLIER", "4"))
+
+# 後場寄り付き時間帯だけ閾値を高めにするための設定
+PM_OPENING_NOISE_ENABLE = (os.environ.get("PM_OPENING_NOISE_ENABLE") or "1").strip() in {"1", "true", "True"}
+PM_OPENING_NOISE_START_HHMM = (os.environ.get("PM_OPENING_NOISE_START_HHMM") or "12:30").strip()
+PM_OPENING_NOISE_END_HHMM = (os.environ.get("PM_OPENING_NOISE_END_HHMM") or "13:00").strip()
+PM_OPENING_SURGE_PRICE_PCT = float(os.environ.get("PM_OPENING_SURGE_PRICE_PCT", str(OPENING_SURGE_PRICE_PCT)))
+PM_OPENING_SURGE_VOLUME_MULTIPLIER = float(os.environ.get("PM_OPENING_SURGE_VOLUME_MULTIPLIER", str(OPENING_SURGE_VOLUME_MULTIPLIER)))
+PM_OPENING_CRASH_PRICE_PCT = float(os.environ.get("PM_OPENING_CRASH_PRICE_PCT", str(OPENING_CRASH_PRICE_PCT)))
+PM_OPENING_CRASH_VOLUME_MULTIPLIER = float(os.environ.get("PM_OPENING_CRASH_VOLUME_MULTIPLIER", str(OPENING_CRASH_VOLUME_MULTIPLIER)))
+
+# 寄り付き直後の発注抑止（前場/後場）
+OPENING_ORDER_SUPPRESS_ENABLE = (os.environ.get("OPENING_ORDER_SUPPRESS_ENABLE") or "1").strip() in {"1", "true", "True"}
+OPENING_ORDER_SUPPRESS_MINUTES = int(os.environ.get("OPENING_ORDER_SUPPRESS_MINUTES", "10"))
+
 # GUIを有効にするかどうか
 ENABLE_GUI = (os.environ.get("ENABLE_GUI") or "").strip() in {"1", "true", "True"}
 
@@ -265,10 +288,10 @@ EDINET_CODE_LIST_PATH = os.environ.get("EDINET_CODE_LIST_PATH", os.path.join(_BA
 # 材料キーワードリスト（ポジティブ/ネガティブ不問、変動が見込まれるもの全て）
 VOLATILITY_KEYWORDS = [
     # --- 明確な好材料 ---
-    "提携", "協業", "開発", "特許", "受注", "増配", "上方修正", "黒字化",
+    "提携", "協業", "開発", "特許", "受注", "増配", "上方修正", "黒字化", "黒字", "増収", "増益",
     "自社株", "買収", "ＴＯＢ", "TOB", "株式分割", "株主優待",
     # --- 明確な悪材料 ---
-    "下方修正", "減配", "赤字", "訴訟", "行政処分", "不適切", "監理銘柄",
+    "下方修正", "減配", "減収", "赤字", "訴訟", "行政処分", "不適切", "監理銘柄",
     "上場廃止", "破産", "倒産", "更生法",
     # --- 相場用語（急動意） ---
     "急騰", "急落", "ストップ高", "ストップ安", "大幅高", "大幅安",
@@ -997,7 +1020,13 @@ def extract_news_published_ts(a_tag: Any, fallback_dt: Optional[datetime.datetim
     try:
         scope = a_tag
         if hasattr(a_tag, "find_parent"):
-            parent = a_tag.find_parent(["li", "div", "article"])
+            # みんかぶは時刻がタイトルaタグの直上divではなく、同じ<li>内の別<div>にあることが多い。
+            # そのため<li>を最優先にスコープとし、見つからなければ広めに辿る。
+            parent = a_tag.find_parent("li")
+            if parent is None:
+                parent = a_tag.find_parent("article")
+            if parent is None:
+                parent = a_tag.find_parent("div")
             if parent is not None:
                 scope = parent
 
@@ -1182,8 +1211,27 @@ def extract_company_fragment_from_yahoo_title(title: str) -> str:
     if not t:
         return ""
     
-    # タイトル先頭の「【...】」や「[...]」を除去
-    t = re.sub(r"^[\[【\(（].*?[\]】\)）]", "", t).strip()
+    # 全角英数字などを正規化（例: "ＮＸＨ" -> "NXH"）
+    t = unicodedata.normalize("NFKC", t).strip()
+
+    # タイトル先頭の「【...】」や「[...]」を（連続していても）除去
+    while True:
+        t2 = re.sub(r"^[\[【\(（].*?[\]】\)）]", "", t).strip()
+        if t2 == t:
+            break
+        t = t2
+
+    # 指定の区切り文字が含まれる場合は、それ以前を会社名断片として優先採用
+    # 例: "加藤製が急騰" -> "加藤製", "Abalance－ストップ安" -> "Abalance"
+    cut_seps = ["---", "－", "ー", "、", "が"]
+    cut_positions = [t.find(sep) for sep in cut_seps if sep and (sep in t)]
+    if cut_positions:
+        pos = min(p for p in cut_positions if p >= 0)
+        frag = t[:pos].strip()
+        if frag:
+            frag = re.sub(r"[\[\]【】\(\)（）]", "", frag).strip()
+            if frag:
+                return frag
     
     # タイトル先頭の空白で区切られた最初の部分を会社名断片として取得
     # 「銘柄名 ニュースタイトル...」の形式を想定
@@ -1194,6 +1242,9 @@ def extract_company_fragment_from_yahoo_title(title: str) -> str:
             for part in parts:
                 frag = part.strip()
                 if frag:
+                    # 英数字のみの断片は確定させる
+                    if re.match(r'^[A-Za-z0-9\-\.]+$', frag):
+                        return frag
                     # 英数字や記号のみの断片はスキップ
                     if re.match(r'^[\sA-Za-z0-9\-\.]+$', frag):
                         continue
@@ -1280,6 +1331,41 @@ def _parse_hhmm(s: str) -> Tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+def _in_hhmm_window(now_dt: datetime.datetime, start_hhmm: str, end_hhmm: str) -> bool:
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    nd = now_dt.astimezone(jst) if now_dt.tzinfo else now_dt.replace(tzinfo=jst)
+    sh, sm = _parse_hhmm(start_hhmm)
+    eh, em = _parse_hhmm(end_hhmm)
+    start = nd.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    end = nd.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if end <= start:
+        return False
+    return (start <= nd < end)
+
+
+def get_surge_crash_thresholds(now_dt: datetime.datetime) -> Tuple[float, float, float, float]:
+    if OPENING_NOISE_ENABLE and _in_hhmm_window(now_dt, OPENING_NOISE_START_HHMM, OPENING_NOISE_END_HHMM):
+        return (
+            float(OPENING_SURGE_PRICE_PCT),
+            float(OPENING_SURGE_VOLUME_MULTIPLIER),
+            float(OPENING_CRASH_PRICE_PCT),
+            float(OPENING_CRASH_VOLUME_MULTIPLIER),
+        )
+    if PM_OPENING_NOISE_ENABLE and _in_hhmm_window(now_dt, PM_OPENING_NOISE_START_HHMM, PM_OPENING_NOISE_END_HHMM):
+        return (
+            float(PM_OPENING_SURGE_PRICE_PCT),
+            float(PM_OPENING_SURGE_VOLUME_MULTIPLIER),
+            float(PM_OPENING_CRASH_PRICE_PCT),
+            float(PM_OPENING_CRASH_VOLUME_MULTIPLIER),
+        )
+    return (
+        float(SURGE_PRICE_PCT),
+        float(SURGE_VOLUME_MULTIPLIER),
+        float(CRASH_PRICE_PCT),
+        float(CRASH_VOLUME_MULTIPLIER),
+    )
+
+
 def is_lunch_batch_window(now_dt: datetime.datetime) -> Tuple[bool, float]:
     """今が昼休みバッチの『溜め込み期間』かどうかと、バッチ解放時刻(epoch)を返す。"""
     if not LUNCH_BATCH_ENABLE:
@@ -1330,7 +1416,7 @@ def detect_special_quote_side(board: Dict[str, Any]) -> str:
     return ""
 
 
-def fetch_minkabu_news(name_dict: Dict[str, str]) -> list:
+def fetch_minkabu_news(name_dict: Dict[str, str], edinet_company_index: Optional[List[Tuple[str, str]]] = None) -> list:
     """みんかぶの材料ニュース一覧をスクレイピングして取得する関数。
 
     Args:
@@ -1355,6 +1441,11 @@ def fetch_minkabu_news(name_dict: Dict[str, str]) -> list:
         # 複数のセレクタパターンに対応（サイト構造変更への耐性）
         # /news/1234567 のような記事リンクを抽出
         articles = soup.find_all("a", href=lambda h: h and re.search(r"^/news/\d+", str(h)))
+        if not articles:
+            print(f"[NEWS][Minkabu] no article links found. status={resp.status_code} html_len={len(resp.text)}")
+            return results
+
+        skipped_no_ts = 0
 
         seen_urls = set()
         for a_tag in articles:
@@ -1377,6 +1468,7 @@ def fetch_minkabu_news(name_dict: Dict[str, str]) -> list:
 
             published_ts = extract_news_published_ts(a_tag, fallback_dt=now_dt)
             if published_ts is None:
+                skipped_no_ts += 1
                 continue
             if published_ts <= time.time() - NEWS_LOOKBACK_SECONDS:
                 continue
@@ -1413,6 +1505,15 @@ def fetch_minkabu_news(name_dict: Dict[str, str]) -> list:
             if not symbol:
                 symbol, matched_name = resolve_symbol_from_title(title_text, name_dict)
 
+            # 優先順位4: タイトル先頭（会社名断片）からEDINET会社名で雑一致
+            if (not symbol) and edinet_company_index:
+                frag = extract_company_fragment_from_yahoo_title(title_text)
+                if frag:
+                    sym2, matched2 = resolve_symbol_from_edinet_company_fragment(frag, edinet_company_index)
+                    if sym2:
+                        symbol = sym2
+                        matched_name = f"(edinet_name:{matched2})"
+
             if has_keyword or symbol:
                 results.append({
                     "source": "minkabu",
@@ -1423,6 +1524,15 @@ def fetch_minkabu_news(name_dict: Dict[str, str]) -> list:
                     "matched_name": matched_name,
                     "published_ts": published_ts,
                 })
+
+        if not results:
+            print(
+                f"[NEWS][Minkabu] fetched_links={len(articles)} skipped_no_ts={skipped_no_ts} results=0 lookback_min={NEWS_LOOKBACK_MINUTES}"
+            )
+
+        print(
+            f"[NEWS][Minkabu] fetched_links={len(articles)} skipped_no_ts={skipped_no_ts} results={len(results)} lookback_min={NEWS_LOOKBACK_MINUTES}"
+        )
 
     except requests.exceptions.Timeout:
         print("[NEWS][Minkabu] timeout")
@@ -1793,6 +1903,23 @@ def decide_side_by_trend(price_pct: float) -> str:
         return "sell"
     return ""
 
+def is_opening_order_suppressed(dt: datetime.datetime) -> bool:
+    if not OPENING_ORDER_SUPPRESS_ENABLE:
+        return False
+    mins = int(OPENING_ORDER_SUPPRESS_MINUTES)
+    if mins <= 0:
+        return False
+
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    nd = dt.astimezone(jst) if dt.tzinfo else dt.replace(tzinfo=jst)
+
+    morning_start = nd.replace(hour=9, minute=0, second=0, microsecond=0)
+    morning_end = morning_start + datetime.timedelta(minutes=mins)
+    pm_start = nd.replace(hour=12, minute=30, second=0, microsecond=0)
+    pm_end = pm_start + datetime.timedelta(minutes=mins)
+
+    return (morning_start <= nd < morning_end) or (pm_start <= nd < pm_end)
+
 def try_place_order(
     token: Optional[str],
     symbol: str,
@@ -1807,22 +1934,35 @@ def try_place_order(
     if not sym or sd not in {"buy", "sell"}:
         return
 
+    is_exit = "auto_exit" in str(reason or "")
+    if is_opening_order_suppressed(datetime.datetime.now(JST)) and (not is_exit):
+        print(f"[ORDER] 寄り付き直後のため新規発注抑止: {sym} ({reason})")
+        try:
+            event_queue.put_nowait({"kind": "event", "text": f"寄り抑止 order {sym}", "symbol": sym, "price": current_price})
+        except Exception:
+            pass
+        append_order_log(
+            {
+                "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+                "symbol": sym,
+                "side": sd,
+                "qty": int(settings.get("qty") or 0),
+                "order_type": str(settings.get("order_type") or ""),
+                "limit_price": "",
+                "cash_margin": str(settings.get("cash_margin") or ""),
+                "reason": reason,
+                "dry_run": bool(settings.get("dry_run")),
+                "status": "",
+                "result": "opening_suppressed",
+                "payload": "",
+            },
+            datetime.datetime.now().strftime("%Y%m%d"),
+        )
+        return
+
     qty = int(settings.get("qty") or 0)
     if qty <= 0:
         return
-
-    is_closing = (sd == "sell" and str(settings.get("cash_margin") or "").strip().lower() == "margin_close")
-    is_exit = "auto_exit" in str(reason or "")
-    if not is_closing and not is_exit:
-        price_min = float(settings.get("price_min") or 0)
-        price_max = float(settings.get("price_max") or 0)
-        cp = float(current_price)
-        if price_min > 0 and cp < price_min:
-            print(f"[ORDER] skip {sym}: price {cp} < price_min {price_min}")
-            return
-        if price_max > 0 and cp > price_max:
-            print(f"[ORDER] skip {sym}: price {cp} > price_max {price_max}")
-            return
 
     order_type = str(settings.get("order_type") or "market").strip().lower()
     limit_pct = float(settings.get("limit_pct") or 0.0)
@@ -3019,7 +3159,7 @@ def main():
         while True:
             now = time.time()
 
-            # 昼休みバッチの解放
+            # 昼休み(11:30-12:30)に検知した銘柄は12:30にまとめて監視開始
             if pending_watchlist and pending_release_at > 0 and now >= pending_release_at:
                 for sym in list(pending_watchlist.keys()):
                     if WATCH_MAX_SYMBOLS > 0 and len(watchlist) >= WATCH_MAX_SYMBOLS:
@@ -3345,7 +3485,7 @@ def main():
                 all_news = []
                 try:
                     # みんかぶから取得
-                    minkabu_articles = fetch_minkabu_news(news_name_dict)
+                    minkabu_articles = fetch_minkabu_news(news_name_dict, edinet_company_index=edinet_company_index)
                     all_news.extend(minkabu_articles)
                     time.sleep(random.uniform(2.0, 5.0))
 
@@ -3475,8 +3615,7 @@ def main():
                 if kabus_token is None:
                     try:
                         kabus_token = kabus_get_token()
-                    except Exception as e:
-                        print(f"KabuStation token error: {e}")
+                    except Exception:
                         kabus_token = None
 
                 try:
@@ -3827,7 +3966,8 @@ def main():
                         )
 
                         # 急騰検知ロジック
-                        if (not state.get("triggered_surge")) and price_pct >= SURGE_PRICE_PCT and volume_mult >= SURGE_VOLUME_MULTIPLIER:
+                        spct, svol, cpct, cvol = get_surge_crash_thresholds(datetime.datetime.now(JST))
+                        if (not state.get("triggered_surge")) and price_pct >= spct and volume_mult >= svol:
                             state["triggered_surge"] = True
                             watchlist[symbol] = state
                             print(f"★急騰検知★ {symbol} 価格:{price} ({price_pct:.2f}%) 出来高:{volume} ({volume_mult:.2f}x)")
@@ -3872,7 +4012,7 @@ def main():
                                 pass
 
                         # 急落検知ロジック
-                        if (not state.get("triggered_crash")) and price_pct <= (-CRASH_PRICE_PCT) and volume_mult >= CRASH_VOLUME_MULTIPLIER:
+                        if (not state.get("triggered_crash")) and price_pct <= (-cpct) and volume_mult >= cvol:
                             state["triggered_crash"] = True
                             watchlist[symbol] = state
                             print(f"★急落検知★ {symbol} 価格:{price} ({price_pct:.2f}%) 出来高:{volume} ({volume_mult:.2f}x)")
