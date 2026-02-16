@@ -42,7 +42,10 @@ def _load_dotenv(path: str = ".env") -> None:
         return
 
 
-_load_dotenv()
+# exe化時にも実行ファイルと同階層を基準にするためのベースディレクトリ
+_BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+_load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
 # -----------------------------------------------------------------------------
 # 定数・設定値の定義
@@ -87,7 +90,7 @@ NEGATIVE_KEYWORDS = [
 # TDnetの適時開示情報閲覧サービスのベースURL
 TDNET_BASE_URL = "https://www.release.tdnet.info/inbs/"
 # ログ保存用のディレクトリ名
-LOG_DIR = "logs"
+LOG_DIR = os.path.join(_BASE_DIR, "logs")
 
 # TDnetポーリング（定期確認）の基本間隔（秒）
 BASE_POLL_SECONDS = 10
@@ -221,7 +224,7 @@ NEWS_WATCH_WINDOW_SECONDS = int(os.environ.get("NEWS_WATCH_WINDOW_SECONDS", "300
 # ニュース由来の銘柄の出来高倍率閾値を上げる倍率（ダマシ対策）
 NEWS_VOLUME_MULT_FACTOR = float(os.environ.get("NEWS_VOLUME_MULT_FACTOR", "1.5"))
 # 略称辞書JSONファイルパス
-NEWS_ALIASES_PATH = os.environ.get("NEWS_ALIASES_PATH", "aliases.json")
+NEWS_ALIASES_PATH = os.environ.get("NEWS_ALIASES_PATH", os.path.join(_BASE_DIR, "aliases.json"))
 
 # 通常は4桁数字だが、新市場等の 285A のような形式も許容する。
 _MANUAL_SYMBOL_RE = re.compile(r"^(?:\d{4}|\d{3}[A-Za-z])$")
@@ -254,7 +257,7 @@ AFTERHOURS_ADD_STOP_END_HHMM = (os.environ.get("AFTERHOURS_ADD_STOP_END_HHMM") o
 SPECIAL_QUOTE_REMOVE_STREAK = int(os.environ.get("SPECIAL_QUOTE_REMOVE_STREAK", "3"))
 
 # EDINETコードリストCSVのパス（EDINETコード→証券コード変換用）
-EDINET_CODE_LIST_PATH = os.environ.get("EDINET_CODE_LIST_PATH", "EdinetcodeDlInfo.csv")
+EDINET_CODE_LIST_PATH = os.environ.get("EDINET_CODE_LIST_PATH", os.path.join(_BASE_DIR, "EdinetcodeDlInfo.csv"))
 
 # 材料キーワードリスト（ポジティブ/ネガティブ不問、変動が見込まれるもの全て）
 VOLATILITY_KEYWORDS = [
@@ -277,9 +280,6 @@ NEWS_REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
 }
-
-# EDINETコードリストCSVのパス（EDINETコード→証券コード変換用）
-EDINET_CODE_LIST_PATH = os.environ.get("EDINET_CODE_LIST_PATH", "EdinetcodeDlInfo.csv")
 
 def build_help_text() -> str:
     """GUIのヘルプ画面に表示する本文を生成する関数。
@@ -1673,9 +1673,9 @@ def calc_limit_price(current_price: float, side: str, pct: float) -> float:
     p = float(current_price)
     rate = float(pct) / 100.0
     if side == "buy":
-        v = p * (1.0 + rate)
-    else:
         v = p * (1.0 - rate)
+    else:
+        v = p * (1.0 + rate)
     return round(v, 1)
 
 def apply_order_settings(order_settings: Dict[str, Any], cmd: Dict[str, Any]) -> None:
@@ -1779,7 +1779,10 @@ def try_place_order(
     if order_type in {"limit_pct", "limit", "limitpercent"}:
         limit_price = calc_limit_price(float(current_price), sd, float(limit_pct))
 
-    if cash_margin == "margin":
+    margin_trade_type = int(settings.get("margin_trade_type") or 2)
+    if cash_margin == "margin_close":
+        order = build_margin_close_order(sym, sd, qty, "limit_pct" if limit_price is not None else "market", limit_price, margin_trade_type=margin_trade_type)
+    elif cash_margin == "margin":
         order = build_margin_new_order(sym, sd, qty, "limit_pct" if limit_price is not None else "market", limit_price)
     else:
         order = build_cash_order(sym, sd, qty, "limit_pct" if limit_price is not None else "market", limit_price)
@@ -1861,9 +1864,9 @@ def build_cash_order(symbol: str, side: str, qty: int, order_type: str, limit_pr
         "SecurityType": 1,
         "Side": "2" if side == "buy" else "1",
         "CashMargin": 1,
-        "DelivType": 2,
+        "DelivType": 2 if side == "buy" else 0,
         "FundType": "AA" if side == "buy" else "  ",
-        "AccountType": 2,
+        "AccountType": 4,
         "Qty": int(qty),
         "ExpireDay": 0,
     }
@@ -1896,8 +1899,44 @@ def build_margin_new_order(symbol: str, side: str, qty: int, order_type: str, li
         "CashMargin": 2,
         "MarginTradeType": 2,
         "DelivType": 0,
-        "AccountType": 2,
+        "AccountType": 4,
         "Qty": int(qty),
+        "ExpireDay": 0,
+    }
+    if order_type == "market":
+        obj["FrontOrderType"] = 10
+        obj["Price"] = 0
+    else:
+        obj["FrontOrderType"] = 20
+        obj["Price"] = float(limit_price or 0)
+    return obj
+
+def build_margin_close_order(symbol: str, side: str, qty: int, order_type: str, limit_price: Optional[float], margin_trade_type: int = 2) -> Dict[str, Any]:
+    """信用返済取引の注文パラメータ辞書を構築するヘルパー関数。
+
+    Args:
+        symbol (str): 銘柄コード。
+        side (str): "buy" (買い返済=売り建玉の返済) or "sell" (売り返済=買い建玉の返済)。
+        qty (int): 数量。
+        order_type (str): "market" (成行) or "limit_pct" (指値)。
+        limit_price (Optional[float]): 指値価格。
+        margin_trade_type (int): 信用取引区分 (1=制度信用, 2=一般信用長期, 3=一般信用デイトレ)。
+
+    Returns:
+        Dict[str, Any]: APIに送信可能な注文オブジェクト。
+    """
+    obj: Dict[str, Any] = {
+        "Symbol": str(symbol),
+        "Exchange": int(KABUS_EXCHANGE),
+        "SecurityType": 1,
+        "Side": "2" if side == "buy" else "1",
+        "CashMargin": 3,
+        "MarginTradeType": int(margin_trade_type),
+        "DelivType": 2,
+        "FundType": "AA",
+        "AccountType": 4,
+        "Qty": int(qty),
+        "ClosePositionOrder": 0,
         "ExpireDay": 0,
     }
     if order_type == "market":
@@ -3637,7 +3676,8 @@ def main():
                             hp_avg = hp.get("avg_price")
 
                             is_cash_long = (hp_cm == 1) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
-                            if is_cash_long:
+                            is_margin_long = (hp_cm == 2) and hp_side == "buy" and isinstance(hp_qty, int) and hp_qty > 0 and isinstance(hp_avg, (int, float))
+                            if is_cash_long or is_margin_long:
                                 profit_target = float(order_settings.get("profit_yen_per_100") or 0.0)
                                 stop_target = float(order_settings.get("stoploss_yen_per_100") or 0.0)
                                 stag_secs = float(order_settings.get("stagnation_seconds") or 0.0)
@@ -3675,7 +3715,7 @@ def main():
                                     state["auto_exit_done"] = True
                                     watchlist[symbol] = state
                                     close_settings = dict(order_settings)
-                                    close_settings["cash_margin"] = "cash"
+                                    close_settings["cash_margin"] = "margin_close" if is_margin_long else "cash"
                                     close_settings["order_type"] = "market"
                                     close_settings["limit_pct"] = 0.0
                                     close_settings["qty"] = int(hp_qty)
