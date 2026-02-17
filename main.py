@@ -1796,6 +1796,55 @@ def kabus_send_order(token: str, order: Dict[str, Any]) -> Tuple[int, Dict[str, 
     status, payload = kabus_api_request("POST", "/kabusapi/sendorder", token=token, body=order)
     return status, payload
 
+def kabus_get_orders(token: str, product: int = 0, order_id: str = "", symbol: str = "", state: str = "", side: str = "", cashmargin: str = "") -> Tuple[int, Any]:
+    """注文約定照会API。注文一覧を取得する。
+    
+    Args:
+        token: APIトークン
+        product: 商品(0=すべて, 1=現物, 2=信用, 3=先物, 4=OP)
+        order_id: 注文番号(指定すると該当注文のみ)
+        symbol: 銘柄コード
+        state: 状態(1=待機, 2=処理中, 3=処理済, 4=訂正取消送信中, 5=終了)
+        side: 売買区分(1=売, 2=買)
+        cashmargin: 取引区分(2=新規, 3=返済)
+    
+    Returns:
+        tuple: (ステータスコード, レスポンス)
+    """
+    params = []
+    if product > 0:
+        params.append(f"product={int(product)}")
+    if order_id:
+        params.append(f"id={order_id}")
+    if symbol:
+        params.append(f"symbol={symbol}")
+    if state:
+        params.append(f"state={state}")
+    if side:
+        params.append(f"side={side}")
+    if cashmargin:
+        params.append(f"cashmargin={cashmargin}")
+    qs = "&".join(params) if params else ""
+    endpoint = f"/kabusapi/orders?{qs}" if qs else "/kabusapi/orders"
+    return kabus_api_request("GET", endpoint, token=token)
+
+def kabus_cancel_order(token: str, order_id: str, password: str) -> Tuple[int, Any]:
+    """注文取消API。
+    
+    Args:
+        token: APIトークン
+        order_id: 注文番号
+        password: 注文パスワード(kabuステーションの注文パスワード)
+    
+    Returns:
+        tuple: (ステータスコード, レスポンス)
+    """
+    body = {
+        "OrderId": order_id,
+        "Password": password
+    }
+    return kabus_api_request("PUT", "/kabusapi/cancelorder", token=token, body=body)
+
 def kabus_get_positions(token: str, product: int = 0, symbol: str = "", side: str = "", addinfo: bool = False) -> Tuple[int, Any]:
     params = [f"product={int(product)}", f"addinfo={'true' if addinfo else 'false'}"]
     if symbol:
@@ -1928,11 +1977,16 @@ def try_place_order(
     settings: Dict[str, Any],
     event_queue: "queue.Queue",
     reason: str,
-) -> None:
+) -> Optional[str]:
+    """注文を発注し、成功時は注文IDを返す。
+    
+    Returns:
+        Optional[str]: 注文ID（成功時）、None（失敗時）
+    """
     sym = str(symbol or "").strip()
     sd = str(side or "").strip().lower()
     if not sym or sd not in {"buy", "sell"}:
-        return
+        return None
 
     is_exit = "auto_exit" in str(reason or "")
     if is_opening_order_suppressed(datetime.datetime.now(JST)) and (not is_exit):
@@ -2048,9 +2102,14 @@ def try_place_order(
             pass
         if status == 200:
             append_order_log({**_order_log_base, "status": status, "result": "ok", "payload": payload}, _order_log_date)
+            order_id = payload.get("OrderId") or payload.get("orderId") or payload.get("order_id")
+            if order_id:
+                return str(order_id)
+            return None
         else:
             print(f"[ORDER] sendorder failed payload={payload}")
             append_order_log({**_order_log_base, "status": status, "result": "failed", "payload": payload}, _order_log_date)
+            return None
     except Exception as e:
         print(f"[ORDER] sendorder error: {e} ({order_desc})")
         try:
@@ -2058,6 +2117,7 @@ def try_place_order(
         except Exception:
             pass
         append_order_log({**_order_log_base, "status": "", "result": "error", "payload": str(e)}, _order_log_date)
+        return None
 
 
 def build_cash_order(symbol: str, side: str, qty: int, order_type: str, limit_price: Optional[float]) -> Dict[str, Any]:
@@ -2161,6 +2221,179 @@ def build_margin_close_order(symbol: str, side: str, qty: int, order_type: str, 
         obj["FrontOrderType"] = 20
         obj["Price"] = float(limit_price or 0)
     return obj
+
+def monitor_order_and_place_profit_limit(
+    token: str,
+    order_id: str,
+    symbol: str,
+    side: str,
+    qty: int,
+    cash_margin: str,
+    margin_trade_type: int,
+    profit_yen_per_100: float,
+    event_queue: "queue.Queue",
+    held_positions: Dict[str, Dict[str, Any]],
+    order_password: str = ""
+) -> None:
+    """新規注文の約定を監視し、約定後に利確指値を入れて5秒監視→未約定ならキャンセルする。
+    
+    この関数は別スレッドで実行されることを想定しています。
+    
+    Args:
+        token: APIトークン
+        order_id: 新規注文の注文ID
+        symbol: 銘柄コード
+        side: 新規注文の売買（"buy" or "sell"）
+        qty: 注文数量
+        cash_margin: 取引区分（"cash", "margin", "margin_close"）
+        margin_trade_type: 信用取引区分
+        profit_yen_per_100: 利確目標（円/100株）
+        event_queue: GUI通知用キュー
+        held_positions: 保有ポジション辞書（二重決済防止用フラグ設定）
+        order_password: 注文パスワード（キャンセル時に必要）
+    """
+    try:
+        print(f"[PROFIT_LIMIT] 約定監視開始: order_id={order_id} {symbol}")
+        
+        # 約定検知（最大10秒間、0.3秒間隔でポーリング）
+        executed_qty = 0
+        avg_price = 0.0
+        max_wait = 10.0
+        poll_interval = 0.3
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            try:
+                st, payload = kabus_get_orders(token, order_id=order_id)
+                if st == 200:
+                    if isinstance(payload, list) and len(payload) > 0:
+                        order_info = payload[0]
+                    elif isinstance(payload, dict):
+                        order_info = payload
+                    else:
+                        time.sleep(poll_interval)
+                        continue
+                    
+                    # 約定数量と平均価格を取得
+                    exec_qty = order_info.get("CumQty") or order_info.get("ExecutedQty") or 0
+                    if isinstance(exec_qty, (int, float)) and exec_qty > 0:
+                        executed_qty = int(exec_qty)
+                        avg_price = float(order_info.get("AvgPrice") or order_info.get("ExecutedPrice") or 0)
+                        if avg_price > 0:
+                            print(f"[PROFIT_LIMIT] 約定検知: {symbol} qty={executed_qty} avg={avg_price:.1f}")
+                            break
+                time.sleep(poll_interval)
+            except Exception as e:
+                print(f"[PROFIT_LIMIT] 約定照会エラー: {e}")
+                time.sleep(poll_interval)
+        
+        if executed_qty <= 0 or avg_price <= 0:
+            print(f"[PROFIT_LIMIT] 約定未検知（タイムアウト）: {symbol}")
+            return
+        
+        # 利確指値価格を計算
+        unit = float(executed_qty) / 100.0
+        if side == "buy":
+            # 買い→売り返済の利確価格
+            target_profit = profit_yen_per_100 * unit
+            profit_price = avg_price + (target_profit / executed_qty)
+            close_side = "sell"
+        else:
+            # 売り→買い返済の利確価格
+            target_profit = profit_yen_per_100 * unit
+            profit_price = avg_price - (target_profit / executed_qty)
+            close_side = "buy"
+        
+        profit_price = round(profit_price, 1)
+        print(f"[PROFIT_LIMIT] 利確指値発注: {symbol} side={close_side} price={profit_price:.1f} qty={executed_qty}")
+        
+        # 利確指値注文を発注
+        if cash_margin == "margin":
+            profit_order = build_margin_close_order(symbol, close_side, executed_qty, "limit", profit_price, margin_trade_type)
+        else:
+            profit_order = build_cash_order(symbol, close_side, executed_qty, "limit", profit_price)
+        
+        st_profit, payload_profit = kabus_send_order(token, profit_order)
+        if st_profit != 200:
+            print(f"[PROFIT_LIMIT] 利確指値発注失敗: {payload_profit}")
+            return
+        
+        profit_order_id = payload_profit.get("OrderId") or payload_profit.get("orderId")
+        if not profit_order_id:
+            print(f"[PROFIT_LIMIT] 利確指値の注文ID取得失敗")
+            return
+        
+        print(f"[PROFIT_LIMIT] 利確指値発注成功: order_id={profit_order_id}")
+        
+        # held_positionsに利確指値稼働中フラグを設定（二重決済防止）
+        if symbol in held_positions:
+            held_positions[symbol]["profit_limit_active"] = True
+            held_positions[symbol]["profit_limit_order_id"] = str(profit_order_id)
+        
+        try:
+            event_queue.put_nowait({"kind": "event", "text": f"利確指値 {symbol} @{profit_price:.1f}", "symbol": symbol, "price": profit_price})
+        except Exception:
+            pass
+        
+        # 5秒間監視（0.5秒間隔でポーリング）
+        monitor_duration = 5.0
+        monitor_interval = 0.5
+        monitor_start = time.time()
+        profit_filled = False
+        
+        while time.time() - monitor_start < monitor_duration:
+            try:
+                st_check, payload_check = kabus_get_orders(token, order_id=str(profit_order_id))
+                if st_check == 200:
+                    if isinstance(payload_check, list) and len(payload_check) > 0:
+                        profit_info = payload_check[0]
+                    elif isinstance(payload_check, dict):
+                        profit_info = payload_check
+                    else:
+                        time.sleep(monitor_interval)
+                        continue
+                    
+                    # 状態チェック（5=終了=全約定含む）
+                    state = profit_info.get("State") or profit_info.get("state")
+                    if state == 5 or state == "5":
+                        profit_filled = True
+                        print(f"[PROFIT_LIMIT] 利確指値約定: {symbol}")
+                        break
+                time.sleep(monitor_interval)
+            except Exception as e:
+                print(f"[PROFIT_LIMIT] 監視エラー: {e}")
+                time.sleep(monitor_interval)
+        
+        # 5秒経過しても未約定ならキャンセル
+        if not profit_filled:
+            print(f"[PROFIT_LIMIT] 5秒経過、利確指値をキャンセル: {symbol}")
+            if order_password:
+                try:
+                    st_cancel, payload_cancel = kabus_cancel_order(token, str(profit_order_id), order_password)
+                    if st_cancel == 200:
+                        print(f"[PROFIT_LIMIT] キャンセル成功: {symbol}")
+                    else:
+                        print(f"[PROFIT_LIMIT] キャンセル失敗: {payload_cancel}")
+                except Exception as e:
+                    print(f"[PROFIT_LIMIT] キャンセルエラー: {e}")
+            else:
+                print(f"[PROFIT_LIMIT] 注文パスワード未設定のためキャンセル不可")
+            
+            try:
+                event_queue.put_nowait({"kind": "event", "text": f"利確指値タイムアウト {symbol}", "symbol": symbol})
+            except Exception:
+                pass
+        
+        # フラグをクリア
+        if symbol in held_positions:
+            held_positions[symbol]["profit_limit_active"] = False
+            held_positions[symbol]["profit_limit_order_id"] = None
+        
+    except Exception as e:
+        print(f"[PROFIT_LIMIT] エラー: {e}")
+        if symbol in held_positions:
+            held_positions[symbol]["profit_limit_active"] = False
+            held_positions[symbol]["profit_limit_order_id"] = None
 
 def extract_price_volume(board: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
     """板情報レスポンスから、現在値と出来高を安全に取り出す関数。
@@ -3931,7 +4164,7 @@ def main():
                                 if streak >= need:
                                     state["triggered_order"] = True
                                     watchlist[symbol] = state
-                                    try_place_order(
+                                    order_id = try_place_order(
                                         token=kabus_token,
                                         symbol=symbol,
                                         side=side,
@@ -3940,6 +4173,32 @@ def main():
                                         event_queue=event_queue,
                                         reason=f"auto vol_mult={volume_mult:.2f}",
                                     )
+                                    
+                                    # 新規発注成功時、利確指値フローを別スレッドで起動
+                                    if order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
+                                        cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
+                                        margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
+                                        profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
+                                        order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                        
+                                        monitor_thread = threading.Thread(
+                                            target=monitor_order_and_place_profit_limit,
+                                            args=(
+                                                kabus_token,
+                                                order_id,
+                                                symbol,
+                                                side,
+                                                int(order_settings.get("qty") or 0),
+                                                cash_margin_str,
+                                                margin_trade_type_val,
+                                                profit_yen,
+                                                event_queue,
+                                                held_positions,
+                                                order_password
+                                            ),
+                                            daemon=True
+                                        )
+                                        monitor_thread.start()
                             else:
                                 # 条件未達なら連続カウントをリセット
                                 if int(state.get("order_hit_streak") or 0) != 0:
@@ -4132,6 +4391,9 @@ def main():
                 if bool(order_settings.get("auto_exit")):
                     for hp_sym, hp in list(held_positions.items()):
                         if hp.get("auto_exit_done"):
+                            continue
+                        # 利確指値稼働中の場合はスキップ（二重決済防止）
+                        if hp.get("profit_limit_active"):
                             continue
                         hp_cm = hp.get("cash_margin")
                         hp_side = str(hp.get("side") or "").strip().lower()
