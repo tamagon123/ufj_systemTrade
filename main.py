@@ -144,6 +144,9 @@ ORDER_CONSECUTIVE_HITS = int(os.environ.get("ORDER_CONSECUTIVE_HITS", "2")) # �
 ORDER_MIN_BASELINE_VOLUME = float(os.environ.get("ORDER_MIN_BASELINE_VOLUME", "50000")) # ベースライン出来高の最低値（普段から出来高がある銘柄のみ）
 ORDER_MIN_PRICE_RANGE_PCT = float(os.environ.get("ORDER_MIN_PRICE_RANGE_PCT", "1.0")) # 監視期間中の最低価格変動幅(%)（継続的な値動きがある銘柄のみ）
 
+# 手動選択銘柄のみを監視するモード（TDnet/EDINET/ニュース自動監視を停止）
+MANUAL_ONLY_MODE = int(os.environ.get("MANUAL_ONLY_MODE", "0"))  # 0=通常モード、1=手動選択銘柄のみモード
+
 # 急騰（Surge）判定の閾値
 SURGE_PRICE_PCT = float(os.environ.get("SURGE_PRICE_PCT", "2")) # 価格上昇率(%)
 SURGE_VOLUME_MULTIPLIER = float(os.environ.get("SURGE_VOLUME_MULTIPLIER", "2")) # 出来高倍率
@@ -3516,7 +3519,25 @@ def main():
                 news_processed_urls = load_news_processed_keys(current_date)
 
             # --- TDnet 監視フェーズ ---
-            if now >= next_tdnet_check_at:
+            if now >= next_tdnet_check_at and MANUAL_ONLY_MODE == 1:
+                # 手動選択銘柄のみモード: TDnet自動監視を一時停止
+                _tdnet_skip_sleep = max(1, float(BASE_POLL_SECONDS + random.uniform(-JITTER_SECONDS, JITTER_SECONDS)))
+                next_tdnet_check_at = now + _tdnet_skip_sleep
+                if not getattr(main, "_tdnet_paused_logged", False):
+                    main._tdnet_paused_logged = True
+                    print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] TDnet監視: 手動選択銘柄のみモード（一時停止中）")
+                    append_csv_log(
+                        {
+                            "date": datetime.datetime.now().strftime("%Y%m%d"),
+                            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                            "code": "",
+                            "name": "MANUAL_ONLY_MODE",
+                            "title": "TDnet自動監視を一時停止（手動選択銘柄のみモード）",
+                        },
+                        current_date,
+                    )
+
+            if now >= next_tdnet_check_at and MANUAL_ONLY_MODE != 1:
                 print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] TDnetチェック中...")
                 try:
                     event_queue.put_nowait({"kind": "tdnet", "text": datetime.datetime.now().strftime("%H:%M:%S")})
@@ -3618,7 +3639,26 @@ def main():
                                 watchlist.setdefault(symbol, st)
 
             # --- EDINET 監視フェーズ ---
-            if EDINET_API_KEY and now >= next_edinet_check_at:
+            if EDINET_API_KEY and now >= next_edinet_check_at and MANUAL_ONLY_MODE == 1:
+                # 手動選択銘柄のみモード: EDINET自動監視を一時停止
+                next_edinet_check_at = now + float(EDINET_POLL_SECONDS)
+                if not getattr(main, "_edinet_paused_logged", False):
+                    main._edinet_paused_logged = True
+                    print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] EDINET監視: 手動選択銘柄のみモード（一時停止中）")
+                    append_edinet_log(
+                        {
+                            "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+                            "doc_id": "MANUAL_ONLY_MODE",
+                            "edinet_code": "",
+                            "symbol": "",
+                            "filer_name": "MANUAL_ONLY_MODE",
+                            "doc_description": "EDINET自動監視を一時停止（手動選択銘柄のみモード）",
+                            "vip_keyword": "",
+                        },
+                        current_date,
+                    )
+
+            if EDINET_API_KEY and now >= next_edinet_check_at and MANUAL_ONLY_MODE != 1:
                 today_hyphen = datetime.datetime.now().strftime("%Y-%m-%d")
                 print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] EDINETチェック中...")
                 try:
@@ -3712,7 +3752,27 @@ def main():
                                     print(f"[EDINET] watchlistに追加: {symbol} (監視時間: {EDINET_WATCH_WINDOW_SECONDS}秒)")
 
             # --- ニュース監視フェーズ ---
-            if now >= next_news_check_at:
+            if now >= next_news_check_at and MANUAL_ONLY_MODE == 1:
+                # 手動選択銘柄のみモード: ニュース自動監視を一時停止
+                next_news_check_at = now + float(NEWS_POLL_SECONDS) + random.uniform(0.0, 5.0)
+                if not getattr(main, "_news_paused_logged", False):
+                    main._news_paused_logged = True
+                    print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] ニュース監視: 手動選択銘柄のみモード（一時停止中）")
+                    append_news_log(
+                        {
+                            "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+                            "source": "MANUAL_ONLY_MODE",
+                            "title": "ニュース自動監視を一時停止（手動選択銘柄のみモード）",
+                            "url": "",
+                            "symbol": "",
+                            "matched_keyword": "",
+                            "matched_name": "",
+                            "published_ts": time.time(),
+                        },
+                        current_date,
+                    )
+
+            if now >= next_news_check_at and MANUAL_ONLY_MODE != 1:
                 print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] ニュースチェック中...")
                 try:
                     event_queue.put_nowait({"kind": "news", "text": datetime.datetime.now().strftime("%H:%M:%S")})
@@ -4187,43 +4247,47 @@ def main():
                                     # 連続して条件を満たした場合のみ発注（ダマシ回避）
                                     need = int(ORDER_CONSECUTIVE_HITS) if int(ORDER_CONSECUTIVE_HITS) > 0 else 1
                                     if streak >= need:
-                                        state["triggered_order"] = True
-                                        watchlist[symbol] = state
-                                        order_id = try_place_order(
-                                            token=kabus_token,
-                                            symbol=symbol,
-                                            side=side,
-                                            current_price=price,
-                                            settings=order_settings,
-                                            event_queue=event_queue,
-                                            reason=f"auto vol_mult={volume_mult:.2f}",
-                                        )
-                                        
-                                        # 新規発注成功時、利確指値フローを別スレッドで起動
-                                        if order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
-                                            cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
-                                            margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
-                                            profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
-                                            order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
-                                            
-                                            monitor_thread = threading.Thread(
-                                                target=monitor_order_and_place_profit_limit,
-                                                args=(
-                                                    kabus_token,
-                                                    order_id,
-                                                    symbol,
-                                                    side,
-                                                    int(order_settings.get("qty") or 0),
-                                                    cash_margin_str,
-                                                    margin_trade_type_val,
-                                                    profit_yen,
-                                                    event_queue,
-                                                    held_positions,
-                                                    order_password
-                                                ),
-                                                daemon=True
+                                        # 手動選択銘柄のみモードの場合、材料由来の銘柄は自動発注しない
+                                        if MANUAL_ONLY_MODE == 1 and str(state.get("source") or "") != "manual":
+                                            print(f"[ORDER] MANUAL_ONLY_MODE: 材料由来の自動発注をスキップ ({symbol}, source={state.get('source')})")
+                                        else:
+                                            state["triggered_order"] = True
+                                            watchlist[symbol] = state
+                                            order_id = try_place_order(
+                                                token=kabus_token,
+                                                symbol=symbol,
+                                                side=side,
+                                                current_price=price,
+                                                settings=order_settings,
+                                                event_queue=event_queue,
+                                                reason=f"auto vol_mult={volume_mult:.2f}",
                                             )
-                                            monitor_thread.start()
+                                        
+                                            # 新規発注成功時、利確指値フローを別スレッドで起動
+                                            if order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
+                                                cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
+                                                margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
+                                                profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
+                                                order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                                
+                                                monitor_thread = threading.Thread(
+                                                    target=monitor_order_and_place_profit_limit,
+                                                    args=(
+                                                        kabus_token,
+                                                        order_id,
+                                                        symbol,
+                                                        side,
+                                                        int(order_settings.get("qty") or 0),
+                                                        cash_margin_str,
+                                                        margin_trade_type_val,
+                                                        profit_yen,
+                                                        event_queue,
+                                                        held_positions,
+                                                        order_password
+                                                    ),
+                                                    daemon=True
+                                                )
+                                                monitor_thread.start()
                                 else:
                                     # デイトレ向きフィルタ未達なら連続カウントをリセット
                                     if int(state.get("order_hit_streak") or 0) != 0:
