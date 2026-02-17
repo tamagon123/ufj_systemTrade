@@ -95,6 +95,12 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "略称辞書JSONのパス。変更すると参照するファイルが変わります。",
     },
     {
+        "key": "MANUAL_ONLY_MODE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1で手動選択銘柄のみモード。TDnet/EDINET/ニュースの自動監視・自動発注を停止し、手動で追加した銘柄のみ監視します。各ログに一時停止の旨が記録されます。",
+    },
+    {
         "key": "MANUAL_WATCH_SYMBOLS",
         "default": "",
         "type": "str",
@@ -303,6 +309,18 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "default": "0.3",
         "type": "float",
         "desc": "自動発注に必要な最低価格変動率(%)。小さいほど発注が増えます。",
+    },
+    {
+        "key": "ORDER_MIN_BASELINE_VOLUME",
+        "default": "50000",
+        "type": "float",
+        "desc": "ベースライン出来高の最低値（株）。普段から出来高がある銘柄のみ自動発注します。0で制限なし。閑散銘柄のダマシ回避に有効です。",
+    },
+    {
+        "key": "ORDER_MIN_PRICE_RANGE_PCT",
+        "default": "1.0",
+        "type": "float",
+        "desc": "監視期間中の最低価格変動幅(%)。継続的な値動きがある銘柄のみ自動発注します。0で制限なし。デイトレ向き銘柄フィルタです。",
     },
     {
         "key": "ORDER_CONSECUTIVE_HITS",
@@ -678,6 +696,8 @@ def _run_gui(env_path: str) -> int:
             return "EDINET"
         if k.startswith("NEWS_"):
             return "ニュース"
+        if k == "MANUAL_ONLY_MODE":
+            return "手動監視"
         if k.startswith("MANUAL_WATCH_"):
             return "手動監視"
         if k.startswith("LUNCH_BATCH_"):
