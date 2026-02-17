@@ -16,6 +16,9 @@ import zipfile
 import re
 import unicodedata
 import builtins
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Optional, Tuple, Dict, Any, List
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -205,6 +208,22 @@ AUTO_EXIT_STAGNATION_SECONDS = float(os.environ.get("AUTO_EXIT_STAGNATION_SECOND
 AUTO_EXIT_STAGNATION_PRICE_PCT = float(os.environ.get("AUTO_EXIT_STAGNATION_PRICE_PCT", "0.2"))
 AUTO_EXIT_STAGNATION_VOLUME_MULT = float(os.environ.get("AUTO_EXIT_STAGNATION_VOLUME_MULT", "1.05"))
 AUTO_EXIT_STAGNATION_HITS = int(os.environ.get("AUTO_EXIT_STAGNATION_HITS", "5"))
+
+# -----------------------------------------------------------------------------
+# Email Notification 設定
+# -----------------------------------------------------------------------------
+EMAIL_ENABLE = (os.environ.get("EMAIL_ENABLE") or "0").strip() in {"1", "true", "True"}
+EMAIL_SMTP_HOST = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")
+EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
+EMAIL_SMTP_USER = os.environ.get("EMAIL_SMTP_USER", "")
+EMAIL_SMTP_PASSWORD = os.environ.get("EMAIL_SMTP_PASSWORD", "")
+EMAIL_TO = os.environ.get("EMAIL_TO", "")
+
+# メール送信スケジュール (前場: 9:30-11:30, 後場: 13:00-15:30)
+EMAIL_SCHEDULE_TIMES = [
+    "09:30", "10:00", "10:30", "11:00", "11:30",
+    "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
+]
 
 # -----------------------------------------------------------------------------
 # EDINET API 設定
@@ -3257,6 +3276,172 @@ def archive_old_logs(keep_days: int = 2) -> None:
         return
 
 
+# -----------------------------------------------------------------------------
+# Email Notification 関連関数
+# -----------------------------------------------------------------------------
+
+def create_email_stats() -> Dict[str, Any]:
+    """メール通知用の統計データを初期化する。"""
+    return {
+        "interval_detections": 0,       # 30分間の検知数（TDnet/EDINET/NEWS合計）
+        "interval_symbols": [],         # 30分間の取引銘柄（発注した銘柄コードリスト）
+        "interval_executions": 0,       # 30分間の約定数（決済完了数）
+        "interval_pnl": 0.0,            # 30分間の確定損益
+        "daily_pnl": 0.0,               # 本日の累計確定損益
+        "last_reset_at": time.time(),
+        "_last_sent_hhmm": "",          # 二重送信防止用
+    }
+
+
+def reset_interval_stats(stats: Dict[str, Any]) -> None:
+    """30分間の区間統計をリセットする（累計損益は維持）。"""
+    stats["interval_detections"] = 0
+    stats["interval_symbols"] = []
+    stats["interval_executions"] = 0
+    stats["interval_pnl"] = 0.0
+    stats["last_reset_at"] = time.time()
+
+
+def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
+    """進捗メールのHTML本文を生成する。
+
+    Args:
+        stats: 統計データ辞書。
+        time_label: 送信時刻ラベル（例: "10:00"）。
+
+    Returns:
+        str: HTML形式のメール本文。
+    """
+    today_str = datetime.datetime.now().strftime("%Y/%m/%d")
+    symbols_str = ", ".join(stats["interval_symbols"]) if stats["interval_symbols"] else "―"
+    interval_pnl = stats["interval_pnl"]
+    daily_pnl = stats["daily_pnl"]
+
+    # 損益の色設定
+    def _pnl_color(v: float) -> str:
+        if v > 0:
+            return "#16a34a"  # green
+        elif v < 0:
+            return "#dc2626"  # red
+        return "#6b7280"      # gray
+
+    def _pnl_str(v: float) -> str:
+        sign = "+" if v > 0 else ""
+        return f"{sign}{v:,.0f} 円"
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>トレード進捗レポート</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f3f4f6; font-family:'Segoe UI','Helvetica Neue','メイリオ',sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
+<tr><td align="center">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg,#1e3a5f,#2563eb); padding:20px 28px;">
+  <h1 style="margin:0; color:#ffffff; font-size:18px; font-weight:600;">📊 トレード進捗レポート</h1>
+  <p style="margin:6px 0 0; color:#bfdbfe; font-size:13px;">{today_str}　{time_label} 時点</p>
+</td>
+</tr>
+
+<!-- 30分間サマリー -->
+<tr>
+<td style="padding:24px 28px 8px;">
+  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">⏱ 直近30分間</h2>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:8px 0; font-size:14px; color:#6b7280; width:40%;">検知数</td>
+      <td style="padding:8px 0; font-size:16px; color:#111827; font-weight:600; text-align:right;">{stats["interval_detections"]} 件</td>
+    </tr>
+    <tr style="background-color:#f9fafb;">
+      <td style="padding:8px 0 8px 8px; font-size:14px; color:#6b7280; border-radius:6px 0 0 6px;">取引銘柄</td>
+      <td style="padding:8px 8px 8px 0; font-size:14px; color:#111827; text-align:right; border-radius:0 6px 6px 0;">{symbols_str}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0; font-size:14px; color:#6b7280;">約定数</td>
+      <td style="padding:8px 0; font-size:16px; color:#111827; font-weight:600; text-align:right;">{stats["interval_executions"]} 件</td>
+    </tr>
+    <tr style="background-color:#f9fafb;">
+      <td style="padding:8px 0 8px 8px; font-size:14px; color:#6b7280; border-radius:6px 0 0 6px;">損益（確定）</td>
+      <td style="padding:8px 8px 8px 0; font-size:16px; font-weight:700; text-align:right; color:{_pnl_color(interval_pnl)}; border-radius:0 6px 6px 0;">{_pnl_str(interval_pnl)}</td>
+    </tr>
+  </table>
+</td>
+</tr>
+
+<!-- 本日累計 -->
+<tr>
+<td style="padding:16px 28px 24px;">
+  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">📅 本日の累計</h2>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:10px 12px; font-size:14px; color:#6b7280; background-color:{_pnl_color(daily_pnl)}10; border-radius:8px 0 0 8px;">累計確定損益</td>
+      <td style="padding:10px 12px; font-size:20px; font-weight:700; text-align:right; color:{_pnl_color(daily_pnl)}; background-color:{_pnl_color(daily_pnl)}10; border-radius:0 8px 8px 0;">{_pnl_str(daily_pnl)}</td>
+    </tr>
+  </table>
+</td>
+</tr>
+
+<!-- Footer -->
+<tr>
+<td style="background-color:#f9fafb; padding:14px 28px; border-top:1px solid #e5e7eb;">
+  <p style="margin:0; font-size:11px; color:#9ca3af; text-align:center;">UFJ System Trade — 自動生成メール</p>
+</td>
+</tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>
+"""
+    return html
+
+
+def send_progress_email(stats: Dict[str, Any], time_label: str) -> bool:
+    """進捗メールをSMTP経由で送信する。
+
+    Args:
+        stats: 統計データ辞書。
+        time_label: 送信時刻ラベル。
+
+    Returns:
+        bool: 送信成功ならTrue。
+    """
+    if not EMAIL_SMTP_USER or not EMAIL_SMTP_PASSWORD or not EMAIL_TO:
+        print("[EMAIL] SMTP認証情報または宛先が未設定のためメール送信スキップ")
+        return False
+
+    today_str = datetime.datetime.now().strftime("%Y/%m/%d")
+    subject = f"[トレード進捗] {today_str} {time_label}"
+    html_body = build_email_html(stats, time_label)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SMTP_USER
+    msg["To"] = EMAIL_TO
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP(EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(EMAIL_SMTP_USER, EMAIL_SMTP_PASSWORD)
+            server.sendmail(EMAIL_SMTP_USER, EMAIL_TO, msg.as_string())
+        print(f"[EMAIL] 進捗メール送信完了: {time_label}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL] 送信エラー: {e}")
+        return False
+
+
 def main():
     """メインのエントリーポイント。
     
@@ -3393,6 +3578,9 @@ def main():
     next_news_check_at = 0.0
     next_positions_check_at = 0.0
     held_positions: Dict[str, Dict[str, Any]] = {}
+
+    # メール通知用統計データ
+    email_stats: Dict[str, Any] = create_email_stats() if EMAIL_ENABLE else {}
 
     try:
         # メインループ
@@ -3586,6 +3774,8 @@ def main():
                         print("-" * 30)
                         append_csv_log(item, item.get("date") or datetime.datetime.now().strftime("%Y%m%d"))
                         processed_titles.add(unique_key)
+                        if EMAIL_ENABLE:
+                            email_stats["interval_detections"] = email_stats.get("interval_detections", 0) + 1
 
                     # 2) 監視(Watch)対象への追加判定
                     # 過去のゴミデータを拾わないよう、最新時刻の開示のみを対象とする
@@ -3696,6 +3886,8 @@ def main():
                             print(f"  証券コード: {symbol}")
                         else:
                             print(f"  証券コード: 不明 (EDINETコード: {doc.get('edinet_code', '')})")
+                        if EMAIL_ENABLE:
+                            email_stats["interval_detections"] = email_stats.get("interval_detections", 0) + 1
                         print("-" * 30)
 
                         # ログ保存
@@ -3832,6 +4024,8 @@ def main():
                     else:
                         print(f"  銘柄: 不明 (キーワード: {matched_kw})")
                     print("-" * 30)
+                    if EMAIL_ENABLE:
+                        email_stats["interval_detections"] = email_stats.get("interval_detections", 0) + 1
 
                     # ニュースログに追記
                     append_news_log(
@@ -4562,7 +4756,7 @@ def main():
                             if hp_mtt is not None:
                                 close_settings["margin_trade_type"] = int(hp_mtt)
                             close_side = "buy" if is_margin_short else "sell"
-                            try_place_order(
+                            _exit_order_id = try_place_order(
                                 token=kabus_token,
                                 symbol=hp_sym,
                                 side=close_side,
@@ -4571,6 +4765,30 @@ def main():
                                 event_queue=event_queue,
                                 reason=f"auto_exit {exit_reason}",
                             )
+                            # 決済注文が成功した場合、確定損益をメール統計に加算
+                            if _exit_order_id and EMAIL_ENABLE:
+                                # pnl_100は100株あたり損益 → 実際の損益に変換
+                                _realized_pnl = pnl_100 * unit
+                                email_stats["interval_pnl"] = email_stats.get("interval_pnl", 0.0) + _realized_pnl
+                                email_stats["daily_pnl"] = email_stats.get("daily_pnl", 0.0) + _realized_pnl
+                                email_stats["interval_executions"] = email_stats.get("interval_executions", 0) + 1
+                                _syms = email_stats.get("interval_symbols", [])
+                                if hp_sym not in _syms:
+                                    _syms.append(hp_sym)
+                                email_stats["interval_symbols"] = _syms
+                                print(f"[EMAIL] 確定損益記録: {hp_sym} {_realized_pnl:+,.0f}円 (累計: {email_stats['daily_pnl']:+,.0f}円)")
+
+            # --- メール通知スケジュールチェック ---
+            if EMAIL_ENABLE and email_stats:
+                now_dt_email = datetime.datetime.now(JST)
+                now_hhmm = now_dt_email.strftime("%H:%M")
+                if now_hhmm in EMAIL_SCHEDULE_TIMES and now_hhmm != email_stats.get("_last_sent_hhmm"):
+                    try:
+                        send_progress_email(email_stats, now_hhmm)
+                    except Exception as e:
+                        print(f"[EMAIL] メール送信で例外発生: {e}")
+                    email_stats["_last_sent_hhmm"] = now_hhmm
+                    reset_interval_stats(email_stats)
 
             time.sleep(0.2) # ビジー待機を防ぐための短いスリープ
 
