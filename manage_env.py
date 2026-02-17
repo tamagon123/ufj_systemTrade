@@ -491,10 +491,58 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "停滞判定が何回続いたら決済するか。大きいほど慎重になります。",
     },
     {
+        "key": "AUTO_EXIT_MARKET_CLOSE_ENABLE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1で大引け前の強制全決済を有効化。指定時刻に全保有ポジションを成行で決済します。",
+    },
+    {
+        "key": "AUTO_EXIT_MARKET_CLOSE_HHMM",
+        "default": "15:15",
+        "type": "str",
+        "desc": "大引け前の強制全決済を実行する時刻(HH:MM)。この時刻以降に全ポジションを成行決済します。",
+    },
+    {
         "key": "EDINET_CODE_LIST_PATH",
         "default": "EdinetcodeDlInfo.csv",
         "type": "str",
         "desc": "EDINETコードリストCSVのパス。銘柄コード変換に使用します。",
+    },
+    {
+        "key": "EMAIL_ENABLE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1でメール通知を有効化。30分間隔で検知数・取引数・損益を自動送信します。",
+    },
+    {
+        "key": "EMAIL_SMTP_HOST",
+        "default": "smtp.gmail.com",
+        "type": "str",
+        "desc": "SMTPサーバーのホスト名。Gmailの場合は smtp.gmail.com。",
+    },
+    {
+        "key": "EMAIL_SMTP_PORT",
+        "default": "587",
+        "type": "int",
+        "desc": "SMTPサーバーのポート番号。TLS(STARTTLS)は587、SSLは465。",
+    },
+    {
+        "key": "EMAIL_SMTP_USER",
+        "default": "",
+        "type": "str",
+        "desc": "SMTP認証のユーザー名（メールアドレス）。",
+    },
+    {
+        "key": "EMAIL_SMTP_PASSWORD",
+        "default": "",
+        "type": "password",
+        "desc": "SMTP認証のパスワード。Gmailの場合はアプリパスワードを使用してください。",
+    },
+    {
+        "key": "EMAIL_TO",
+        "default": "",
+        "type": "str",
+        "desc": "通知メールの送信先アドレス。",
     },
 ]
 
@@ -714,6 +762,8 @@ def _run_gui(env_path: str) -> int:
             return "イベント検知"
         if k.startswith("AUTO_EXIT_"):
             return "自動決済"
+        if k.startswith("EMAIL_"):
+            return "メール通知"
         return "その他"
 
     def show_desc(key: str) -> None:

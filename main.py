@@ -209,6 +209,10 @@ AUTO_EXIT_STAGNATION_PRICE_PCT = float(os.environ.get("AUTO_EXIT_STAGNATION_PRIC
 AUTO_EXIT_STAGNATION_VOLUME_MULT = float(os.environ.get("AUTO_EXIT_STAGNATION_VOLUME_MULT", "1.05"))
 AUTO_EXIT_STAGNATION_HITS = int(os.environ.get("AUTO_EXIT_STAGNATION_HITS", "5"))
 
+# 大引け前の強制全決済設定
+AUTO_EXIT_MARKET_CLOSE_ENABLE = (os.environ.get("AUTO_EXIT_MARKET_CLOSE_ENABLE") or "1").strip() in {"1", "true", "True"}
+AUTO_EXIT_MARKET_CLOSE_HHMM = (os.environ.get("AUTO_EXIT_MARKET_CLOSE_HHMM") or "15:15").strip()
+
 # -----------------------------------------------------------------------------
 # Email Notification 設定
 # -----------------------------------------------------------------------------
@@ -2281,10 +2285,10 @@ def monitor_order_and_place_profit_limit(
     try:
         print(f"[PROFIT_LIMIT] 約定監視開始: order_id={order_id} {symbol}")
         
-        # 約定検知（最大10秒間、0.3秒間隔でポーリング）
+        # 約定検知（最大30秒間、0.3秒間隔でポーリング）
         executed_qty = 0
         avg_price = 0.0
-        max_wait = 10.0
+        max_wait = 30.0
         poll_interval = 0.3
         start_time = time.time()
         
@@ -2361,8 +2365,8 @@ def monitor_order_and_place_profit_limit(
         except Exception:
             pass
         
-        # 5秒間監視（0.5秒間隔でポーリング）
-        monitor_duration = 5.0
+        # 30秒間監視（0.5秒間隔でポーリング）
+        monitor_duration = 30.0
         monitor_interval = 0.5
         monitor_start = time.time()
         profit_filled = False
@@ -2390,9 +2394,9 @@ def monitor_order_and_place_profit_limit(
                 print(f"[PROFIT_LIMIT] 監視エラー: {e}")
                 time.sleep(monitor_interval)
         
-        # 5秒経過しても未約定ならキャンセル
+        # 30秒経過しても未約定ならキャンセル
         if not profit_filled:
-            print(f"[PROFIT_LIMIT] 5秒経過、利確指値をキャンセル: {symbol}")
+            print(f"[PROFIT_LIMIT] 30秒経過、利確指値をキャンセル: {symbol}")
             if order_password:
                 try:
                     st_cancel, payload_cancel = kabus_cancel_order(token, str(profit_order_id), order_password)
@@ -3582,6 +3586,9 @@ def main():
     # メール通知用統計データ
     email_stats: Dict[str, Any] = create_email_stats() if EMAIL_ENABLE else {}
 
+    # 大引け前強制全決済の日次フラグ
+    market_close_exit_done_today: str = ""  # 実行済みの日付文字列（二重実行防止）
+
     try:
         # メインループ
         while True:
@@ -4732,13 +4739,37 @@ def main():
                             exit_reason = f"stop_loss pnl/100={pnl_100:.0f}"
                         else:
                             first_seen = float(hp.get("first_seen_at") or now)
+                            stag_price_pct_limit = float(order_settings.get("stagnation_price_pct") or 0.0)
+                            stag_vol_mult_limit = float(order_settings.get("stagnation_volume_mult") or 0.0)
+
+                            # 膠着判定: 経過時間 + 価格変動率が小さい + 出来高倍率が低い
                             if stag_secs > 0 and (now - first_seen) >= stag_secs:
-                                streak3 = int(hp.get("stagnation_exit_streak") or 0) + 1
-                                hp["stagnation_exit_streak"] = streak3
-                                held_positions[hp_sym] = hp
-                                if streak3 >= stag_hits_need:
-                                    should_exit = True
-                                    exit_reason = f"stagnation hits={streak3}"
+                                # 持値からの価格変動率(%)を算出
+                                _stag_price_pct = abs((cp - float(hp_avg)) / float(hp_avg) * 100.0) if float(hp_avg) > 0 else 0.0
+                                _stag_price_ok = (stag_price_pct_limit <= 0 or _stag_price_pct <= stag_price_pct_limit)
+
+                                # 出来高倍率: watchlistに同銘柄があれば参照、なければ条件パス
+                                _wl_state = watchlist.get(hp_sym)
+                                if _wl_state and _wl_state.get("rate_ema") is not None:
+                                    _wl_ema = float(_wl_state.get("rate_ema") or 0.0)
+                                    _wl_denom = max(_wl_ema, float(WATCH_VOLRATE_MIN_BASE))
+                                    _stag_vol_mult = (_wl_ema / _wl_denom) if _wl_denom > 0 else 0.0
+                                else:
+                                    _stag_vol_mult = 0.0  # watchlist外は条件パス
+                                _stag_vol_ok = (stag_vol_mult_limit <= 0 or _stag_vol_mult <= stag_vol_mult_limit)
+
+                                if _stag_price_ok and _stag_vol_ok:
+                                    streak3 = int(hp.get("stagnation_exit_streak") or 0) + 1
+                                    hp["stagnation_exit_streak"] = streak3
+                                    held_positions[hp_sym] = hp
+                                    if streak3 >= stag_hits_need:
+                                        should_exit = True
+                                        exit_reason = f"stagnation hits={streak3} price_pct={_stag_price_pct:.2f}% vol_mult={_stag_vol_mult:.2f}"
+                                else:
+                                    # 値動きや出来高がある場合はストリークをリセット
+                                    if int(hp.get("stagnation_exit_streak") or 0) != 0:
+                                        hp["stagnation_exit_streak"] = 0
+                                        held_positions[hp_sym] = hp
                             else:
                                 if int(hp.get("stagnation_exit_streak") or 0) != 0:
                                     hp["stagnation_exit_streak"] = 0
@@ -4777,6 +4808,90 @@ def main():
                                     _syms.append(hp_sym)
                                 email_stats["interval_symbols"] = _syms
                                 print(f"[EMAIL] 確定損益記録: {hp_sym} {_realized_pnl:+,.0f}円 (累計: {email_stats['daily_pnl']:+,.0f}円)")
+
+            # --- 大引け前強制全決済 ---
+            if AUTO_EXIT_MARKET_CLOSE_ENABLE and bool(order_settings.get("auto_exit")):
+                now_dt_close = datetime.datetime.now(JST)
+                close_today_str = now_dt_close.strftime("%Y%m%d")
+                if market_close_exit_done_today != close_today_str:
+                    try:
+                        close_h, close_m = AUTO_EXIT_MARKET_CLOSE_HHMM.split(":")
+                        close_time = now_dt_close.replace(hour=int(close_h), minute=int(close_m), second=0, microsecond=0)
+                    except Exception:
+                        close_time = now_dt_close.replace(hour=15, minute=15, second=0, microsecond=0)
+
+                    if now_dt_close >= close_time:
+                        market_close_exit_done_today = close_today_str
+                        print(f"[MARKET_CLOSE] 大引け前強制決済開始 ({AUTO_EXIT_MARKET_CLOSE_HHMM})")
+                        try:
+                            event_queue.put_nowait({"kind": "event", "text": f"大引け前強制決済 {AUTO_EXIT_MARKET_CLOSE_HHMM}", "symbol": ""})
+                        except Exception:
+                            pass
+
+                        for mc_sym, mc_hp in list(held_positions.items()):
+                            if mc_hp.get("auto_exit_done"):
+                                continue
+                            mc_qty = mc_hp.get("qty")
+                            if not isinstance(mc_qty, int) or mc_qty <= 0:
+                                continue
+                            mc_side = str(mc_hp.get("side") or "").strip().lower()
+                            mc_cm = mc_hp.get("cash_margin")
+                            mc_avg = mc_hp.get("avg_price")
+
+                            is_margin = (mc_cm == 2)
+                            close_side = "buy" if (is_margin and mc_side == "sell") else "sell"
+
+                            mc_cp = mc_hp.get("current_price") or 0
+                            if mc_cp is None or mc_cp <= 0:
+                                try:
+                                    st_mc, board_mc = kabus_get_board(mc_sym, kabus_token)
+                                    if st_mc == 200 and isinstance(board_mc, dict):
+                                        bp_mc, _ = extract_price_volume(board_mc)
+                                        if bp_mc is not None:
+                                            mc_cp = float(bp_mc)
+                                except Exception:
+                                    mc_cp = 0
+
+                            mc_hp["auto_exit_done"] = True
+                            held_positions[mc_sym] = mc_hp
+
+                            mc_close_settings = dict(order_settings)
+                            mc_close_settings["cash_margin"] = "margin_close" if is_margin else "cash"
+                            mc_close_settings["order_type"] = "market"
+                            mc_close_settings["limit_pct"] = 0.0
+                            mc_close_settings["qty"] = int(mc_qty)
+                            mc_mtt = mc_hp.get("margin_trade_type")
+                            if mc_mtt is not None:
+                                mc_close_settings["margin_trade_type"] = int(mc_mtt)
+
+                            mc_order_id = try_place_order(
+                                token=kabus_token,
+                                symbol=mc_sym,
+                                side=close_side,
+                                current_price=float(mc_cp) if mc_cp else 0.0,
+                                settings=mc_close_settings,
+                                event_queue=event_queue,
+                                reason=f"auto_exit market_close {AUTO_EXIT_MARKET_CLOSE_HHMM}",
+                            )
+                            print(f"[MARKET_CLOSE] 強制決済: {mc_sym} side={close_side} qty={mc_qty}")
+
+                            # メール統計更新
+                            if mc_order_id and EMAIL_ENABLE and isinstance(mc_avg, (int, float)) and mc_cp and mc_cp > 0:
+                                mc_unit = float(mc_qty) / 100.0
+                                if is_margin and mc_side == "sell":
+                                    mc_pnl = (float(mc_avg) - float(mc_cp)) * float(mc_qty)
+                                else:
+                                    mc_pnl = (float(mc_cp) - float(mc_avg)) * float(mc_qty)
+                                email_stats["interval_pnl"] = email_stats.get("interval_pnl", 0.0) + mc_pnl
+                                email_stats["daily_pnl"] = email_stats.get("daily_pnl", 0.0) + mc_pnl
+                                email_stats["interval_executions"] = email_stats.get("interval_executions", 0) + 1
+                                _mc_syms = email_stats.get("interval_symbols", [])
+                                if mc_sym not in _mc_syms:
+                                    _mc_syms.append(mc_sym)
+                                email_stats["interval_symbols"] = _mc_syms
+                                print(f"[EMAIL] 強制決済損益記録: {mc_sym} {mc_pnl:+,.0f}円 (累計: {email_stats['daily_pnl']:+,.0f}円)")
+
+                        print(f"[MARKET_CLOSE] 強制決済完了")
 
             # --- メール通知スケジュールチェック ---
             if EMAIL_ENABLE and email_stats:
