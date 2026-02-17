@@ -140,6 +140,10 @@ WATCH_RATE_LIMIT_BACKOFF_MAX = float(os.environ.get("WATCH_RATE_LIMIT_BACKOFF_MA
 ORDER_MIN_PRICE_PCT = float(os.environ.get("ORDER_MIN_PRICE_PCT", "0.3")) # 最低限必要な価格変動率
 ORDER_CONSECUTIVE_HITS = int(os.environ.get("ORDER_CONSECUTIVE_HITS", "2")) # 条件合致が何回続いたら発注するか
 
+# デイトレ向き銘柄フィルタ（流動性とボラティリティのチェック）
+ORDER_MIN_BASELINE_VOLUME = float(os.environ.get("ORDER_MIN_BASELINE_VOLUME", "50000")) # ベースライン出来高の最低値（普段から出来高がある銘柄のみ）
+ORDER_MIN_PRICE_RANGE_PCT = float(os.environ.get("ORDER_MIN_PRICE_RANGE_PCT", "1.0")) # 監視期間中の最低価格変動幅(%)（継続的な値動きがある銘柄のみ）
+
 # 急騰（Surge）判定の閾値
 SURGE_PRICE_PCT = float(os.environ.get("SURGE_PRICE_PCT", "2")) # 価格上昇率(%)
 SURGE_VOLUME_MULTIPLIER = float(os.environ.get("SURGE_VOLUME_MULTIPLIER", "2")) # 出来高倍率
@@ -3994,6 +3998,8 @@ def main():
                             state["last_vol_at"] = float(now)
                             state["vol_hist"] = [(float(now), float(volume))]
                             state["rate_ema"] = None
+                            state["max_price"] = price  # 監視期間中の最高値
+                            state["min_price"] = price  # 監視期間中の最安値
                             base_poll = float(get_watch_poll_seconds())
                             state["next_board_at"] = float(now) + random.uniform(0.0, max(0.2, base_poll))
                             state["board_backoff"] = 0.0
@@ -4063,6 +4069,12 @@ def main():
                             alpha = 1.0
                         state["rate_ema"] = (float(prev_ema) * (1.0 - alpha)) + (float(vol_rate) * alpha)
                         
+                        # 最高値・最安値の更新（価格変動幅の追跡）
+                        max_price = float(state.get("max_price") or price)
+                        min_price = float(state.get("min_price") or price)
+                        state["max_price"] = max(max_price, price)
+                        state["min_price"] = min(min_price, price)
+                        
                         state["last_volume"] = volume
                         state["last_vol_at"] = float(now)
                         state["next_board_at"] = float(now) + float(get_watch_poll_seconds()) + random.uniform(0.0, 0.3)
@@ -4128,15 +4140,8 @@ def main():
                         _bv_min = float(order_settings.get("base_volume_min") or 0)
                         _vol_mult_ok = volume_mult >= float(order_settings.get("volume_mult") or 0)
                         _bv_ok = (_bv_min <= 0 or float(volume) >= _bv_min)
+                        
                         if (
-                            str(order_settings.get("mode")).lower() == "auto"
-                            and (not state.get("triggered_order"))
-                            and (not _hp_has_position)
-                            and _vol_mult_ok
-                            and _bv_ok
-                        ):
-                            pass  # 条件クリア — 下のブロックで発注判定へ
-                        elif (
                             str(order_settings.get("mode")).lower() == "auto"
                             and (not state.get("triggered_order"))
                             and (not _hp_has_position)
@@ -4144,7 +4149,7 @@ def main():
                             and (not _bv_ok)
                         ):
                             print(f"[ORDER] skip {symbol}: volume {volume:.0f} < base_volume_min {_bv_min:.0f}")
-
+                        
                         if (
                             str(order_settings.get("mode")).lower() == "auto"
                             and (not state.get("triggered_order"))
@@ -4155,52 +4160,77 @@ def main():
                             side = decide_side_by_trend(price_pct)
                             # 価格変動率フィルタと売買フィルタの確認
                             if side and should_place_side(str(order_settings.get("side_mode")), side) and abs(float(price_pct)) >= float(ORDER_MIN_PRICE_PCT):
-                                streak = int(state.get("order_hit_streak") or 0) + 1
-                                state["order_hit_streak"] = streak
-                                watchlist[symbol] = state
+                                # デイトレ向き銘柄フィルタ（案C + 案A）
+                                min_baseline_vol = float(ORDER_MIN_BASELINE_VOLUME)
+                                min_price_range_pct = float(ORDER_MIN_PRICE_RANGE_PCT)
                                 
-                                # 連続して条件を満たした場合のみ発注（ダマシ回避）
-                                need = int(ORDER_CONSECUTIVE_HITS) if int(ORDER_CONSECUTIVE_HITS) > 0 else 1
-                                if streak >= need:
-                                    state["triggered_order"] = True
+                                # ベースライン出来高チェック（普段から出来高がある銘柄のみ）
+                                baseline_vol_ok = (min_baseline_vol <= 0 or base_volume >= min_baseline_vol)
+                                
+                                # 価格変動幅チェック（監視期間中に十分な値動きがある銘柄のみ）
+                                max_p = float(state.get("max_price") or price)
+                                min_p = float(state.get("min_price") or price)
+                                price_range_pct = ((max_p - min_p) / base_price * 100.0) if base_price > 0 else 0.0
+                                price_range_ok = (min_price_range_pct <= 0 or price_range_pct >= min_price_range_pct)
+                                
+                                # フィルタ除外時のログ出力
+                                if not baseline_vol_ok:
+                                    print(f"[ORDER] skip {symbol}: baseline_volume {base_volume:.0f} < min {min_baseline_vol:.0f} (閑散銘柄)")
+                                if not price_range_ok:
+                                    print(f"[ORDER] skip {symbol}: price_range {price_range_pct:.2f}% < min {min_price_range_pct:.2f}% (値動き不足)")
+                                
+                                if baseline_vol_ok and price_range_ok:
+                                    streak = int(state.get("order_hit_streak") or 0) + 1
+                                    state["order_hit_streak"] = streak
                                     watchlist[symbol] = state
-                                    order_id = try_place_order(
-                                        token=kabus_token,
-                                        symbol=symbol,
-                                        side=side,
-                                        current_price=price,
-                                        settings=order_settings,
-                                        event_queue=event_queue,
-                                        reason=f"auto vol_mult={volume_mult:.2f}",
-                                    )
                                     
-                                    # 新規発注成功時、利確指値フローを別スレッドで起動
-                                    if order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
-                                        cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
-                                        margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
-                                        profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
-                                        order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
-                                        
-                                        monitor_thread = threading.Thread(
-                                            target=monitor_order_and_place_profit_limit,
-                                            args=(
-                                                kabus_token,
-                                                order_id,
-                                                symbol,
-                                                side,
-                                                int(order_settings.get("qty") or 0),
-                                                cash_margin_str,
-                                                margin_trade_type_val,
-                                                profit_yen,
-                                                event_queue,
-                                                held_positions,
-                                                order_password
-                                            ),
-                                            daemon=True
+                                    # 連続して条件を満たした場合のみ発注（ダマシ回避）
+                                    need = int(ORDER_CONSECUTIVE_HITS) if int(ORDER_CONSECUTIVE_HITS) > 0 else 1
+                                    if streak >= need:
+                                        state["triggered_order"] = True
+                                        watchlist[symbol] = state
+                                        order_id = try_place_order(
+                                            token=kabus_token,
+                                            symbol=symbol,
+                                            side=side,
+                                            current_price=price,
+                                            settings=order_settings,
+                                            event_queue=event_queue,
+                                            reason=f"auto vol_mult={volume_mult:.2f}",
                                         )
-                                        monitor_thread.start()
+                                        
+                                        # 新規発注成功時、利確指値フローを別スレッドで起動
+                                        if order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
+                                            cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
+                                            margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
+                                            profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
+                                            order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                            
+                                            monitor_thread = threading.Thread(
+                                                target=monitor_order_and_place_profit_limit,
+                                                args=(
+                                                    kabus_token,
+                                                    order_id,
+                                                    symbol,
+                                                    side,
+                                                    int(order_settings.get("qty") or 0),
+                                                    cash_margin_str,
+                                                    margin_trade_type_val,
+                                                    profit_yen,
+                                                    event_queue,
+                                                    held_positions,
+                                                    order_password
+                                                ),
+                                                daemon=True
+                                            )
+                                            monitor_thread.start()
+                                else:
+                                    # デイトレ向きフィルタ未達なら連続カウントをリセット
+                                    if int(state.get("order_hit_streak") or 0) != 0:
+                                        state["order_hit_streak"] = 0
+                                        watchlist[symbol] = state
                             else:
-                                # 条件未達なら連続カウントをリセット
+                                # 価格変動率フィルタ未達なら連続カウントをリセット
                                 if int(state.get("order_hit_streak") or 0) != 0:
                                     state["order_hit_streak"] = 0
                                     watchlist[symbol] = state
