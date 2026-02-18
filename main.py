@@ -388,33 +388,330 @@ def build_help_text() -> str:
         - アプリの仕様変更時はここを修正してヘルプを最新化します。
     """
     lines = []
-    lines.append("TDnet監視 / 自動売買 ヘルプ")
+    lines.append("========================================")
+    lines.append("  TDnet監視 / 自動売買システム ヘルプ")
+    lines.append("========================================")
+    lines.append("")
     lines.append("")
     lines.append("■ 概要")
-    lines.append("- TDnetの好材料キーワードを監視し、該当銘柄を一定時間ウォッチします。")
-    lines.append("- ウォッチ中の銘柄について、板情報から 価格変化率(%) と 出来高倍率 を計算します。")
-    lines.append("- 条件に合致するとイベント表示を行い、モードが自動の場合は順張りで発注します。")
+    lines.append("─────────────────────────────")
+    lines.append("本システムは、TDnet（適時開示）・EDINET（大量保有報告等）・ニュース")
+    lines.append("（みんかぶ/Yahoo!ファイナンス）の3つの情報源を常時監視し、好材料・")
+    lines.append("注目材料が出た銘柄の株価・出来高をリアルタイムで追跡します。")
+    lines.append("条件に合致した場合、KabuStation API（auカブコム証券）経由で自動発注")
+    lines.append("または手動発注を行い、自動決済（利確・損切・膠着撤退・大引け決済）")
+    lines.append("まで一貫して管理します。")
     lines.append("")
-    lines.append("■ 注文設定")
-    lines.append("- モード: 自動/手動")
-    lines.append("- 売買: 両方/買いのみ/売りのみ")
-    lines.append("- 取引区分: 現物/信用(新規)")
-    lines.append("- 注文種類: 成行/指値(±%)")
-    lines.append("- 数量(株): 発注株数")
-    lines.append("- 出来高倍率: 自動発注トリガの閾値")
-    lines.append("- DRY_RUN(テスト): ONで実発注せず内容表示のみ")
-    lines.append("- 確認ダイアログ: ONで実行前に確認")
+    lines.append("  処理フロー:")
+    lines.append("  材料検知 → 監視リスト追加 → 板情報ポーリング → 条件判定")
+    lines.append("  → 発注（自動/手動） → 利確指値発注 → 自動決済監視")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 情報源と監視対象")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("【TDnet（適時開示）】")
+    lines.append("  - ポーリング間隔: 約10秒")
+    lines.append("  - 好材料キーワード: 上方修正, 増配, 復配, 株式分割, 自社株,")
+    lines.append("    提携, M&A, 特別利益, 決算")
+    lines.append("  - 除外キーワード: 下方修正, 減配, 無配, 赤字, 取り下げ, 中止 等")
+    lines.append("  - 監視時間: 検知から最大180秒間")
+    lines.append("")
+    lines.append("【EDINET（大量保有報告等）】")
+    lines.append("  - ポーリング間隔: 約60秒")
+    lines.append("  - 対象書類: 大量保有報告書, 変更報告書, 公開買付届出書")
+    lines.append("  - VIPキーワード: 光通信, シティインデックス, レオス,")
+    lines.append("    ストラテジック, エフィッシモ, 野村證券 等")
+    lines.append("  - 監視時間: 検知から最大600秒間")
+    lines.append("")
+    lines.append("【ニュース（みんかぶ / Yahoo!ファイナンス）】")
+    lines.append("  - ポーリング間隔: 約45秒")
+    lines.append("  - 対象: 材料キーワード（急騰, ストップ高, 大量保有 等）に")
+    lines.append("    合致する記事から銘柄コードを抽出")
+    lines.append("  - 監視時間: 検知から最大300秒間")
+    lines.append("  - ニュース由来銘柄は出来高倍率閾値が1.5倍に引き上げ（ダマシ対策）")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 画面構成")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("【ステータス表示エリア】（画面上部）")
+    lines.append("  - 監視銘柄数: 現在監視中の銘柄数（[詳細]ボタンで一覧表示）")
+    lines.append("  - TDnet: 最終チェック時刻")
+    lines.append("  - EDINET: 最終チェック時刻")
+    lines.append("  - NEWS: 最終チェック時刻")
+    lines.append("  - KabuStation: API接続状態")
+    lines.append("  - イベント: 直近の検知・発注イベント")
+    lines.append("")
+    lines.append("【ボタン】（画面上部右）")
+    lines.append("  - [ランキング]: KabuStation APIから値上がり率ランキングを取得し、")
+    lines.append("    選択した銘柄を手動監視銘柄に設定できます。")
+    lines.append("  - [ヘルプ]: この画面を表示します。")
+    lines.append("")
+    lines.append("【注文設定エリア】（画面中央）")
+    lines.append("  各設定項目の詳細は後述の「注文設定の詳細」を参照。")
+    lines.append("  [注文設定を反映]ボタンで設定を適用し、.envファイルにも保存されます。")
+    lines.append("")
+    lines.append("【手動監視銘柄エリア】（最大5銘柄）")
+    lines.append("  証券コード（4桁数字 or 3桁+英字）を入力し[反映]ボタンで適用。")
+    lines.append("  手動監視銘柄は常時監視（最大24時間）され、早期終了の対象外です。")
+    lines.append("  .envファイルにも保存されます。")
+    lines.append("")
+    lines.append("【実行ログエリア】")
+    lines.append("  設定反映・手動監視銘柄変更などの操作結果を表示します。")
+    lines.append("")
+    lines.append("【コンソールログエリア】")
+    lines.append("  メインスレッドのprint出力（発注結果、検知ログ等）を表示します。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 注文設定の詳細")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("【モード】 auto / manual")
+    lines.append("  - auto（自動）: 出来高倍率等の条件を満たすと自動で発注します。")
+    lines.append("  - manual（手動）: 自動発注は行わず、[手動発注]ボタンでのみ発注します。")
+    lines.append("")
+    lines.append("【売買】 both / buy / sell")
+    lines.append("  - both（両方）: 価格変化率に応じて買い・売りの両方を許可。")
+    lines.append("  - buy（買いのみ）: 買い注文のみ許可。")
+    lines.append("  - sell（売りのみ）: 売り注文のみ許可。")
+    lines.append("  ※ 売買方向はトレンド判定（price_pct>0→買い, <0→売り）で自動決定。")
+    lines.append("")
+    lines.append("【取引区分】 cash / margin")
+    lines.append("  - cash（現物）: 現物取引で発注します。")
+    lines.append("  - margin（信用新規）: 信用取引（一般信用デイトレ）で発注します。")
+    lines.append("    ※ 信用の場合、決済は自動で信用返済（margin_close）になります。")
+    lines.append("")
+    lines.append("【注文種類】 market / limit_pct")
+    lines.append("  - market（成行）: 成行注文で発注します。")
+    lines.append("  - limit_pct（指値±%）: 現在値から指定%乖離した価格で指値注文。")
+    lines.append("    右の入力欄に乖離率(%)を入力します（例: 1 → 現在値±1%）。")
+    lines.append("    買いなら現在値+X%、売りなら現在値-X%が指値価格になります。")
+    lines.append("")
+    lines.append("【数量(株)】")
+    lines.append("  1回の発注で注文する株数。通常は100の倍数を指定します。")
+    lines.append("")
+    lines.append("【出来高倍率】")
+    lines.append("  自動発注のトリガー閾値。監視中の銘柄の出来高増加ペースが")
+    lines.append("  この倍率を超えた場合に発注条件の1つとして判定されます。")
+    lines.append("  ※ 出来高倍率は直近10秒間の出来高増加率のEMA（指数平滑移動平均）")
+    lines.append("    を基準に算出されます。")
+    lines.append("")
+    lines.append("【株価値幅】 下限 / 上限")
+    lines.append("  発注対象とする株価の範囲を指定します。")
+    lines.append("  - 下限: この価格未満の銘柄には発注しません（0=制限なし）。")
+    lines.append("  - 上限: この価格を超える銘柄には発注しません（0=制限なし）。")
+    lines.append("")
+    lines.append("【出来高下限】")
+    lines.append("  急増前（ベースライン）の出来高がこの値未満の銘柄には発注しません。")
+    lines.append("  普段から出来高が極端に少ない銘柄を除外するためのフィルタです。")
+    lines.append("  0=制限なし。")
+    lines.append("")
+    lines.append("【DRY_RUN(テスト)】")
+    lines.append("  ONにすると、発注処理を実行せずにログ出力のみ行います。")
+    lines.append("  初回導入時や設定変更後の動作確認に使用してください。")
+    lines.append("")
+    lines.append("【確認ダイアログ】")
+    lines.append("  ONにすると、発注前に確認ダイアログが表示されます。")
+    lines.append("  OKを押すまで発注されません。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 自動決済設定の詳細")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("【自動決済チェックボックス】")
+    lines.append("  ONにすると、保有ポジションに対して以下の自動決済が有効になります。")
+    lines.append("  OFFの場合、利確指値・損切・膠着撤退・大引け決済は全て無効です。")
+    lines.append("")
+    lines.append("【利確(円/100株)】")
+    lines.append("  100株あたりの目標利益額（円）。")
+    lines.append("  例: 1000 → 100株保有で+1,000円、200株保有で+2,000円が利確ライン。")
+    lines.append("")
+    lines.append("  ＜利確指値の仕組み＞")
+    lines.append("  新規建て注文が約定すると、自動的に利確指値注文（返済注文）が")
+    lines.append("  別スレッドで発注されます。")
+    lines.append("  - 約定検知: 注文APIを最大30秒間ポーリングし、約定を検知")
+    lines.append("  - 利確価格: 約定平均価格 ± (利確目標額 / 約定数量) で算出")
+    lines.append("    買い建て → 約定価格 + 利確幅 の売り指値")
+    lines.append("    売り建て → 約定価格 - 利確幅 の買い指値")
+    lines.append("  - 指値注文を発注後、30秒間約定を監視")
+    lines.append("  - 30秒以内に約定しなかった場合は自動キャンセル")
+    lines.append("  - キャンセル後は通常の自動決済ループ（損切・膠着判定）に移行")
+    lines.append("")
+    lines.append("  ＜通常の利確判定＞")
+    lines.append("  利確指値がキャンセルされた後も、保有中は板情報から現在値を取得し、")
+    lines.append("  含み益が利確ラインに達した時点で成行の返済注文を発注します。")
+    lines.append("")
+    lines.append("【損切(円/100株)】")
+    lines.append("  100株あたりの損切額（円）。含み損がこの額に達すると成行で決済。")
+    lines.append("  例: 500 → 100株保有で-500円に達したら損切。")
+    lines.append("")
+    lines.append("【停滞秒】")
+    lines.append("  ポジション保有開始からこの秒数が経過し、かつ以下の膠着条件を")
+    lines.append("  満たす場合に撤退（成行決済）します。")
+    lines.append("  例: 120 → 保有から120秒（2分）経過後に膠着判定を開始。")
+    lines.append("")
+    lines.append("【値幅%】")
+    lines.append("  膠着判定の価格変動率閾値。保有平均価格からの変動率(%)が")
+    lines.append("  この値以下の場合、「値動きが乏しい」と判定します。")
+    lines.append("  例: 0.2 → 保有価格から±0.2%以内なら膠着とみなす。")
+    lines.append("")
+    lines.append("【出来高倍】")
+    lines.append("  膠着判定の出来高倍率閾値。出来高増加ペースがこの倍率以下の場合、")
+    lines.append("  「出来高が落ち着いた」と判定します。")
+    lines.append("  例: 1.05 → 出来高倍率が1.05倍以下なら膠着とみなす。")
+    lines.append("")
+    lines.append("【連続】")
+    lines.append("  膠着条件を連続で何回満たしたら決済するかの回数。")
+    lines.append("  一時的な膠着で誤決済しないためのフィルタです。")
+    lines.append("  例: 5 → 膠着条件を5回連続で満たしたら撤退。")
+    lines.append("")
+    lines.append("【大引け前強制全決済】")
+    lines.append("  自動決済がONの場合、設定時刻（デフォルト15:15）に")
+    lines.append("  全保有ポジションを成行で強制決済します。")
+    lines.append("  ※ .envの AUTO_EXIT_MARKET_CLOSE_HHMM で時刻変更可能。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 自動発注の条件と流れ")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("自動発注（モード=auto時）は以下の全条件を満たした場合に実行されます:")
+    lines.append("")
+    lines.append("  1. 出来高倍率 >= 設定値")
+    lines.append("  2. 出来高下限チェック（設定時のみ）")
+    lines.append("  3. 価格変動率 >= 0.3%（環境変数 ORDER_MIN_PRICE_PCT）")
+    lines.append("  4. 売買フィルタに合致（both/buy/sell）")
+    lines.append("  5. ベースライン出来高 >= 50,000（環境変数 ORDER_MIN_BASELINE_VOLUME）")
+    lines.append("  6. 監視期間中の価格変動幅 >= 1.0%（環境変数 ORDER_MIN_PRICE_RANGE_PCT）")
+    lines.append("  7. 連続ヒット回数 >= 2回（環境変数 ORDER_CONSECUTIVE_HITS）")
+    lines.append("  8. 同一銘柄で未発注であること（多重発注防止）")
+    lines.append("  9. 同一銘柄を保有していないこと")
+    lines.append("")
+    lines.append("  ※ 条件5,6,7はデイトレ向き銘柄フィルタ（ダマシ回避）です。")
+    lines.append("  ※ 寄り付き直後（前場/後場の最初10分間）は新規発注が抑制されます。")
+    lines.append("  ※ カットオフ時刻（デフォルト15:00）以降は新規建て注文が抑制されます。")
+    lines.append("")
     lines.append("")
     lines.append("■ 手動発注")
-    lines.append("- 直近銘柄に対し、価格変化率の符号で買い/売りを決めて発注します。")
-    lines.append("  - price_pct>0 なら買い、price_pct<0 なら売り")
+    lines.append("─────────────────────────────")
     lines.append("")
-    lines.append("■ 自動発注（順張り）")
-    lines.append("- 条件: モード=自動 かつ 出来高倍率>=閾値 かつ 売買フィルタに合致")
-    lines.append("- 多重発注防止: 1銘柄につき自動発注は原則1回に抑止")
+    lines.append("  [手動発注]ボタンを押すと、「直近銘柄」に表示されている銘柄に対し")
+    lines.append("  発注を行います。")
+    lines.append("  - 売買方向: 価格変化率(price_pct)の符号で自動判定")
+    lines.append("    price_pct > 0 → 買い / price_pct < 0 → 売り")
+    lines.append("  - 注文内容は「注文設定」の各項目（取引区分、注文種類、数量等）に従います。")
+    lines.append("  - 自動決済がONの場合、手動発注でも利確指値が自動発注されます。")
     lines.append("")
-    lines.append("■ 注意")
-    lines.append("- 実運用は必ず小ロット/DRY_RUNで十分に検証してください。")
+    lines.append("")
+    lines.append("■ 手動監視銘柄")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  最大5銘柄の証券コードを入力し[反映]で監視リストに追加できます。")
+    lines.append("  - 常時監視（最大24時間）で、早期終了の対象外です。")
+    lines.append("  - TDnet/EDINET/ニュースとは独立して監視されます。")
+    lines.append("  - MANUAL_ONLY_MODE=1 の場合、材料由来の自動発注は停止され、")
+    lines.append("    手動監視銘柄のみが自動発注の対象になります。")
+    lines.append("  - [ランキング]画面から値上がり率上位銘柄を選択して設定することも可能です。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ ランキング機能")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  [ランキング]ボタンで値上がり率ランキング画面を開きます。")
+    lines.append("  - KabuStation APIから値上がり率ランキングを取得")
+    lines.append("  - チェックボックスで銘柄を選択し[適用]で手動監視銘柄に設定")
+    lines.append("  - [更新]ボタンで最新データを再取得")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 寄り付きノイズ対策")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  前場寄り付き（9:00-9:30）と後場寄り付き（12:30-13:00）は")
+    lines.append("  急騰/急落検知の閾値が通常より高く設定されます（ダマシ回避）。")
+    lines.append("  - 通常: 価格変動率2%以上 かつ 出来高倍率2倍以上")
+    lines.append("  - 寄り付き: 価格変動率3%以上 かつ 出来高倍率4倍以上")
+    lines.append("  また、寄り付き直後10分間は新規発注が自動的に抑制されます。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 昼休み・朝バッチ処理")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  - 昼休み（11:30-12:30）に検知された材料は、12:30にまとめて")
+    lines.append("    監視リストに追加されます。")
+    lines.append("  - 早朝（0:00-9:00）に検知された当日材料は、9:00にまとめて")
+    lines.append("    監視リストに追加されます。")
+    lines.append("  - 15:30以降に検知された材料は監視リストに追加されません")
+    lines.append("    （情報収集のみ）。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ メール通知")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  .envで EMAIL_ENABLE=1 に設定すると、30分ごとに進捗メールが")
+    lines.append("  送信されます（前場: 9:00-11:30, 後場: 12:30-15:30）。")
+    lines.append("  メール内容: 検知数、取引銘柄、約定数、確定損益、保有ポジション等。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ ログファイル")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  logs/<日付>/ 配下に以下のCSVログが自動保存されます:")
+    lines.append("  - tdnet_<日付>.csv: TDnet開示情報")
+    lines.append("  - edinet_<日付>.csv: EDINET検知情報")
+    lines.append("  - news_<日付>.csv: ニュース検知情報")
+    lines.append("  - events_<日付>.csv: 急騰/急落イベント")
+    lines.append("  - orders_<日付>.csv: 発注履歴")
+    lines.append("  - watch/<銘柄コード>.csv: 銘柄別の監視詳細ログ")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 環境変数（.envファイル）")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  GUI上の設定は[注文設定を反映]ボタンで .env に自動保存されます。")
+    lines.append("  以下は .env でのみ変更可能な主要設定です:")
+    lines.append("")
+    lines.append("  [API接続]")
+    lines.append("  - KABUS_API_PASSWORD: KabuStation APIパスワード")
+    lines.append("  - KABUS_ORDER_PASSWORD: 注文パスワード（利確指値キャンセル用）")
+    lines.append("  - KABUS_EXCHANGE: 取引所（1=東証）")
+    lines.append("")
+    lines.append("  [発注フィルタ]")
+    lines.append("  - ORDER_MIN_PRICE_PCT: 最低価格変動率(%) [デフォルト: 0.3]")
+    lines.append("  - ORDER_CONSECUTIVE_HITS: 連続ヒット回数 [デフォルト: 2]")
+    lines.append("  - ORDER_MIN_BASELINE_VOLUME: ベースライン出来高下限 [デフォルト: 50000]")
+    lines.append("  - ORDER_MIN_PRICE_RANGE_PCT: 最低価格変動幅(%) [デフォルト: 1.0]")
+    lines.append("  - ORDER_CUTOFF_HHMM: 新規建てカットオフ時刻 [デフォルト: 15:00]")
+    lines.append("")
+    lines.append("  [自動決済]")
+    lines.append("  - AUTO_EXIT_MARKET_CLOSE_ENABLE: 大引け強制決済 [デフォルト: 1]")
+    lines.append("  - AUTO_EXIT_MARKET_CLOSE_HHMM: 強制決済時刻 [デフォルト: 15:15]")
+    lines.append("")
+    lines.append("  [監視パラメータ]")
+    lines.append("  - WATCH_MAX_SYMBOLS: 同時監視最大銘柄数 [デフォルト: 8]")
+    lines.append("  - MANUAL_ONLY_MODE: 手動銘柄のみモード [デフォルト: 0]")
+    lines.append("  - SPECIAL_QUOTE_REMOVE_STREAK: 特別気配除外回数 [デフォルト: 3]")
+    lines.append("")
+    lines.append("  [メール通知]")
+    lines.append("  - EMAIL_ENABLE: メール通知有効化 [デフォルト: 0]")
+    lines.append("  - EMAIL_SMTP_HOST / PORT / USER / PASSWORD: SMTP設定")
+    lines.append("  - EMAIL_TO: 送信先メールアドレス")
+    lines.append("")
+    lines.append("  [EDINET]")
+    lines.append("  - EDINET_API_KEY: EDINET APIサブスクリプションキー")
+    lines.append("  - EDINET_REQUIRE_VIP: VIPキーワード必須 [デフォルト: 0]")
+    lines.append("")
+    lines.append("")
+    lines.append("■ 注意事項")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  - 実運用前に必ず DRY_RUN=ON で十分に動作確認してください。")
+    lines.append("  - 小ロット（100株）から開始し、挙動を確認してから増やしてください。")
+    lines.append("  - KabuStation（kabuステーション）が起動・ログイン済みである必要があります。")
+    lines.append("  - APIのレートリミット（1秒あたりのリクエスト数制限）に注意してください。")
+    lines.append("    監視銘柄数が多いとレートリミットに達する場合があります。")
+    lines.append("  - 信用取引はリスクが高いため、十分な理解の上でご利用ください。")
+    lines.append("  - 本システムの利用による損失について、開発者は一切の責任を負いません。")
+    lines.append("")
     return "\n".join(lines)
 
 # CSVログのカラム定義
@@ -2397,13 +2694,35 @@ def monitor_order_and_place_profit_limit(
                         continue
                     
                     # 約定数量と平均価格を取得
-                    exec_qty = order_info.get("CumQty") or order_info.get("ExecutedQty") or 0
-                    if isinstance(exec_qty, (int, float)) and exec_qty > 0:
-                        executed_qty = int(exec_qty)
-                        avg_price = float(order_info.get("AvgPrice") or order_info.get("ExecutedPrice") or 0)
-                        if avg_price > 0:
-                            print(f"[PROFIT_LIMIT] 約定検知: {symbol} qty={executed_qty} avg={avg_price:.1f}")
-                            break
+                    # KabuStation APIはトップレベルにAvgPriceを返さないため
+                    # Details配列(RecType=8)から約定価格・数量を集計する
+                    exec_qty = order_info.get("CumQty") or 0
+                    details = order_info.get("Details")
+                    detail_total_amount = 0.0
+                    detail_total_qty = 0
+                    if isinstance(details, list):
+                        for d in details:
+                            if not isinstance(d, dict):
+                                continue
+                            rec_type = d.get("RecType")
+                            if rec_type not in (8, "8"):
+                                continue
+                            d_price = d.get("Price")
+                            d_qty = d.get("Qty")
+                            if isinstance(d_price, (int, float)) and d_price > 0 and isinstance(d_qty, (int, float)) and d_qty > 0:
+                                detail_total_amount += float(d_price) * float(d_qty)
+                                detail_total_qty += int(d_qty)
+                    
+                    # CumQtyまたはDetails集計から約定数量を確定
+                    final_qty = detail_total_qty if detail_total_qty > 0 else (int(exec_qty) if isinstance(exec_qty, (int, float)) and exec_qty > 0 else 0)
+                    # 平均約定価格をDetails集計から算出
+                    final_avg = (detail_total_amount / detail_total_qty) if detail_total_qty > 0 else 0.0
+                    
+                    if final_qty > 0 and final_avg > 0:
+                        executed_qty = final_qty
+                        avg_price = final_avg
+                        print(f"[PROFIT_LIMIT] 約定検知: {symbol} qty={executed_qty} avg={avg_price:.1f}")
+                        break
                 time.sleep(poll_interval)
             except Exception as e:
                 print(f"[PROFIT_LIMIT] 約定照会エラー: {e}")
@@ -2743,7 +3062,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     def open_help():
         w = tk.Toplevel(root)
         w.title("ヘルプ / 使い方")
-        w.geometry("720x520")
+        w.geometry("760x700")
 
         body = tk.Frame(w)
         body.pack(fill="both", expand=True, padx=8, pady=8)
@@ -2780,12 +3099,33 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         w.geometry("720x620")
         w.resizable(True, True)
 
+        # 親画面をロック（モーダル）
+        w.grab_set()
+        w.focus_set()
+
+        def _on_close():
+            try:
+                w.grab_release()
+            except tk.TclError:
+                pass
+            w.destroy()
+
+        w.protocol("WM_DELETE_WINDOW", _on_close)
+
         # ランキングタイプ定義: (表示名, APIのType値, 値列のヘッダ)
         RANKING_TABS = [
             ("出来高急増", 6, "出来高急増率"),
             ("売買代金", 4, "売買代金(百万円)"),
             ("ティック数", 5, "ティック数"),
         ]
+
+        # ttk.Style でTreeviewに薄い罫線を付与
+        style = ttk.Style(w)
+        style.configure("Ranking.Treeview", rowheight=24)
+        # 行間の罫線を表示するためにテーマ設定
+        style.layout("Ranking.Treeview", [
+            ('Ranking.Treeview.treearea', {'sticky': 'nswe'})
+        ])
 
         notebook = ttk.Notebook(w)
         notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -2809,7 +3149,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
             """各タブの内容を構築する"""
             # Treeview（表形式）
             cols = ("no", "code", "name", "price", "change", "value")
-            tree = ttk.Treeview(parent_frame, columns=cols, show="headings", height=20, selectmode="none")
+            tree = ttk.Treeview(parent_frame, columns=cols, show="headings", height=20, selectmode="none", style="Ranking.Treeview")
 
             tree.heading("no", text="No")
             tree.heading("code", text="コード")
@@ -2832,9 +3172,12 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
 
             tab_trees.append(tree)
 
-            # チェックボックス的なトグル: タグで背景色を切り替え
+            # チェックボックス的なトグル: タグで背景色を切り替え（文字色は黒のまま）
             tree.tag_configure("selected", background="#cce5ff")
             tree.tag_configure("normal", background="")
+            # 偶数行・奇数行で薄い罫線風の背景色を付与
+            tree.tag_configure("stripe", background="#f5f5f5")
+            tree.tag_configure("selected_stripe", background="#cce5ff")
 
             def on_click(event):
                 item_id = tree.identify_row(event.y)
@@ -2848,17 +3191,21 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                     return
 
                 bvar = selected_vars[symbol]
+                # 現在のタグから背景情報を保持
+                current_tags = tree.item(item_id, "tags")
+                is_stripe = any("stripe" in t for t in current_tags)
+
                 if bvar.get():
                     # 選択解除
                     bvar.set(False)
-                    tree.item(item_id, tags=("normal",))
+                    tree.item(item_id, tags=(_build_row_tag(False, is_stripe),))
                 else:
                     # 選択数チェック
                     if count_selected() >= 5:
                         messagebox.showwarning("選択上限", "最大5銘柄まで選択できます。\n他の銘柄の選択を解除してください。")
                         return
                     bvar.set(True)
-                    tree.item(item_id, tags=("selected",))
+                    tree.item(item_id, tags=(_build_row_tag(True, is_stripe),))
 
                 # ステータス更新
                 sel = get_selected_symbols()
@@ -2866,22 +3213,41 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
 
             tree.bind("<Button-1>", on_click)
 
-        def load_ranking_data():
-            """全タブのランキングデータを取得して表示する"""
-            status_var.set("ランキングデータ取得中...")
-            w.update_idletasks()
+        def _build_row_tag(is_selected: bool, is_stripe: bool) -> str:
+            """行の状態に応じた適切なタグ名を返す（背景のみ制御）"""
+            if is_selected:
+                return "selected_stripe" if is_stripe else "selected"
+            else:
+                return "stripe" if is_stripe else "normal"
 
+        def _do_load_ranking():
+            """バックグラウンドスレッドでAPIデータを取得する"""
+            results = []
             for tab_idx, (tab_name, ranking_type, value_header) in enumerate(RANKING_TABS):
+                try:
+                    status, payload = kabus_get_ranking(_rk_token, ranking_type=ranking_type)
+                    results.append((tab_idx, ranking_type, status, payload, None))
+                except Exception as e:
+                    results.append((tab_idx, ranking_type, None, None, e))
+            return results
+
+        def _apply_ranking_results(results):
+            """メインスレッドでTreeviewにデータを反映する"""
+            try:
+                if not w.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+
+            for tab_idx, ranking_type, status, payload, err in results:
                 tree = tab_trees[tab_idx]
                 # 既存データをクリア
                 for item in tree.get_children():
                     tree.delete(item)
                 tab_data[tab_idx] = []
 
-                try:
-                    status, payload = kabus_get_ranking(_rk_token, ranking_type=ranking_type)
-                except Exception as e:
-                    status_var.set(f"エラー: {e}")
+                if err is not None:
+                    status_var.set(f"エラー: {err}")
                     continue
 
                 if status != 200:
@@ -2909,6 +3275,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                         price_f = float(price_val)
                         price_str = f"{price_f:,.1f}" if price_f else "-"
                     except (ValueError, TypeError):
+                        price_f = 0.0
                         price_str = str(price_val)
 
                     # 前日比%
@@ -2917,6 +3284,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                         change_f = float(change_pct)
                         change_str = f"{change_f:+.2f}%"
                     except (ValueError, TypeError):
+                        change_f = 0.0
                         change_str = str(change_pct)
 
                     # ランキング固有の値
@@ -2945,11 +3313,44 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                     if symbol and symbol not in selected_vars:
                         selected_vars[symbol] = tk.BooleanVar(value=False)
 
-                    tree.insert("", "end", values=(rank_no, symbol, name, price_str, change_str, value_str), tags=("normal",))
+                    # 現在値・前日比に▲▼マーカーを付与（+赤=▲、-緑=▼を文字で表現）
+                    if change_f > 0:
+                        price_str = f"△ {price_str}"
+                        change_str = f"△ {change_str}"
+                    elif change_f < 0:
+                        price_str = f"▼ {price_str}"
+                        change_str = f"▼ {change_str}"
+
+                    is_stripe = (rank_no % 2 == 0)  # 偶数行にストライプ
+                    row_tag = _build_row_tag(False, is_stripe)
+
+                    tree.insert("", "end", values=(rank_no, symbol, name, price_str, change_str, value_str), tags=(row_tag,))
                     tab_data[tab_idx].append({"symbol": symbol, "name": name})
 
             sel = get_selected_symbols()
             status_var.set(f"取得完了  選択中: {len(sel)}/5" if not sel else f"取得完了  選択中: {len(sel)}/5  ({', '.join(sel)})")
+            _rk_loading[0] = False
+
+        # ロード中フラグ（リスト参照で共有）
+        _rk_loading = [False]
+
+        def load_ranking_data():
+            """全タブのランキングデータを取得して表示する（非同期）"""
+            if _rk_loading[0]:
+                return
+            _rk_loading[0] = True
+            status_var.set("ランキングデータ取得中...")
+            w.update_idletasks()
+
+            def _bg_task():
+                results = _do_load_ranking()
+                try:
+                    w.after(0, lambda: _apply_ranking_results(results))
+                except tk.TclError:
+                    pass
+
+            import threading
+            threading.Thread(target=_bg_task, daemon=True).start()
 
         # 各タブを作成
         for tab_idx, (tab_name, ranking_type, value_header) in enumerate(RANKING_TABS):
@@ -2965,9 +3366,13 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         btn_frame.pack(fill="x", padx=8, pady=8)
 
         def on_refresh():
-            # 選択状態をリセット
-            selected_vars.clear()
-            load_ranking_data()
+            # ウィンドウを閉じて再度開きなおす
+            try:
+                w.grab_release()
+            except tk.TclError:
+                pass
+            w.destroy()
+            root.after(50, open_ranking_window)
 
         def on_apply():
             sel_syms = get_selected_symbols()
@@ -2997,11 +3402,11 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
             _append_exec_log(f"[{ts}] ランキングから手動監視銘柄を設定: {desc}")
 
             messagebox.showinfo("適用完了", f"手動監視銘柄を設定しました:\n{desc}")
-            w.destroy()
+            _on_close()
 
         tk.Button(btn_frame, text="更新", command=on_refresh, width=10).pack(side="left", padx=(0, 6))
         tk.Button(btn_frame, text="適用（手動監視に設定）", command=on_apply, width=22).pack(side="left", padx=(0, 6))
-        tk.Button(btn_frame, text="閉じる", command=w.destroy, width=10).pack(side="right")
+        tk.Button(btn_frame, text="閉じる", command=_on_close, width=10).pack(side="right")
 
         # 初回データ取得
         w.after(100, load_ranking_data)
@@ -5107,7 +5512,7 @@ def main():
                             else:
                                 side = decide_side_by_trend(price_pct) # トレンド判定（外部関数想定）
                                 if side and should_place_side(str(order_settings.get("side_mode")), side): # 設定との照合
-                                    try_place_order(
+                                    manual_order_id = try_place_order(
                                         token=kabus_token,
                                         symbol=symbol,
                                         side=side,
@@ -5116,6 +5521,32 @@ def main():
                                         event_queue=event_queue,
                                         reason="manual",
                                     )
+                                    
+                                    # 手動発注成功時も利確指値フローを別スレッドで起動
+                                    if manual_order_id and bool(order_settings.get("auto_exit")) and float(order_settings.get("profit_yen_per_100") or 0.0) > 0:
+                                        cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
+                                        margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
+                                        profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
+                                        order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                        
+                                        monitor_thread = threading.Thread(
+                                            target=monitor_order_and_place_profit_limit,
+                                            args=(
+                                                kabus_token,
+                                                manual_order_id,
+                                                symbol,
+                                                side,
+                                                int(order_settings.get("qty") or 0),
+                                                cash_margin_str,
+                                                margin_trade_type_val,
+                                                profit_yen,
+                                                event_queue,
+                                                held_positions,
+                                                order_password
+                                            ),
+                                            daemon=True
+                                        )
+                                        monitor_thread.start()
 
                         # 自動発注ロジック（保有中の銘柄は新規発注しない）
                         _bv_min = float(order_settings.get("base_volume_min") or 0)
