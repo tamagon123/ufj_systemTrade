@@ -61,11 +61,8 @@ def main():
     # 損益計算テスト
     print("\n[3/4] 損益計算テスト (APIから都度取得)...")
     try:
-        realized, unrealized = _compute_daily_pnl(token, executions)
-        total = realized + unrealized
-        print(f"  → 実現損益  : {realized:+,.0f}円")
-        print(f"  → 含み損益  : {unrealized:+,.0f}円")
-        print(f"  → 合計      : {total:+,.0f}円")
+        daily_pnl = _compute_daily_pnl(token, executions)
+        print(f"  → 確定損益（受取+支払）: {daily_pnl:+,.0f}円")
     except Exception as e:
         print(f"  → 損益計算エラー: {e}")
 
