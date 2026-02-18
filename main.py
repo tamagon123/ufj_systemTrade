@@ -1224,9 +1224,13 @@ def load_edinet_company_code_index(path: str) -> List[Tuple[str, str]]:
                 name_jp = (r[6] or "").strip()
                 if not sec_raw or not name_jp:
                     continue
-                # 末尾の0を除去 (例: 72030 -> 7203)
-                sec = sec_raw.rstrip("0")
-                if not sec or not sec.isdigit():
+                # EDINETでは証券コードが5桁（末尾に0が1つ付加）で格納されている
+                # rstrip("0")だと6140→614のように0が全て消えるため、末尾1文字のみ除去する
+                if len(sec_raw) == 5 and sec_raw.endswith("0"):
+                    sec = sec_raw[:-1]
+                else:
+                    sec = sec_raw
+                if len(sec) != 4 or not sec.isdigit():
                     continue
                 rows.append((name_jp, sec))
     except Exception:
@@ -3298,7 +3302,7 @@ def create_email_stats() -> Dict[str, Any]:
 
 
 def reset_interval_stats(stats: Dict[str, Any]) -> None:
-    """30分間の区間統計をリセットする（累計損益は維持）。"""
+    """30分間の区間統計をリセットする（累計損益・累計約定履歴は維持）。"""
     stats["interval_detections"] = 0
     stats["interval_symbols"] = []
     stats["interval_executions"] = 0
@@ -3306,7 +3310,135 @@ def reset_interval_stats(stats: Dict[str, Any]) -> None:
     stats["last_reset_at"] = time.time()
 
 
-def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
+def _collect_env_settings() -> List[Dict[str, str]]:
+    """現在の環境変数設定値をリストとして収集する。"""
+    items = []
+    for key, val in sorted(os.environ.items()):
+        # このシステム固有の設定のみ（.envで定義されるもの）
+        if key.startswith(("KABUS_", "ORDER_", "WATCH_", "SURGE_", "CRASH_",
+                           "OPENING_", "PM_OPENING_", "AUTO_EXIT_", "EDINET_",
+                           "NEWS_", "EMAIL_", "ENABLE_", "PROMPT_", "MANUAL_",
+                           "LUNCH_", "MORNING_", "AFTERHOURS_", "SPECIAL_")):
+            # パスワード系はマスク
+            display_val = val
+            if "PASSWORD" in key or "API_KEY" in key:
+                display_val = "****" if val else ""
+            items.append({"key": key, "value": display_val})
+    return items
+
+
+def _fetch_todays_executions(token: Optional[str]) -> List[Dict[str, Any]]:
+    """本日の約定履歴をKabuStation APIから取得する。
+
+    新規建（CashMargin=2）および返済（CashMargin=3）の両方を含む。
+    state=5（終了）の注文から約定済みのものを抽出する。
+
+    Args:
+        token: KabuStation APIトークン。Noneの場合は空リストを返す。
+
+    Returns:
+        約定履歴のリスト。各要素は time, symbol, name, price, qty, side, trade_type を含む。
+    """
+    if not token:
+        return []
+    try:
+        # state=5: 終了（約定済み・取消済み等）
+        st, payload = kabus_get_orders(token, product=0, state="5")
+        if st != 200 or not isinstance(payload, list):
+            print(f"[EMAIL] 約定履歴取得失敗: status={st}")
+            return []
+    except Exception as e:
+        print(f"[EMAIL] 約定履歴取得例外: {e}")
+        return []
+
+    executions: List[Dict[str, Any]] = []
+    today_str = datetime.datetime.now(JST).strftime("%Y%m%d")
+
+    for order in payload:
+        if not isinstance(order, dict):
+            continue
+
+        # 約定数量が0の注文はスキップ（取消等）
+        cum_qty = order.get("CumQty") or 0
+        if not isinstance(cum_qty, (int, float)) or cum_qty <= 0:
+            continue
+
+        # 注文受付時刻から本日の注文か判定
+        recv_time = str(order.get("RecvTime") or "")
+        if recv_time and not recv_time.startswith(f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:8]}"):
+            continue
+
+        symbol = str(order.get("Symbol") or "").strip()
+        symbol_name = str(order.get("SymbolName") or "").strip()
+        side_raw = order.get("Side")
+        cash_margin_raw = order.get("CashMargin")
+
+        # Side: 1=売, 2=買
+        if side_raw in (2, "2"):
+            side_label = "買"
+        elif side_raw in (1, "1"):
+            side_label = "売"
+        else:
+            side_label = str(side_raw)
+
+        # CashMargin: 1=現物, 2=新規, 3=返済
+        if cash_margin_raw in (2, "2"):
+            trade_type = "新規"
+        elif cash_margin_raw in (3, "3"):
+            trade_type = "返済"
+        elif cash_margin_raw in (1, "1"):
+            trade_type = "現物"
+        else:
+            trade_type = str(cash_margin_raw)
+
+        avg_price = float(order.get("Price") or 0)
+
+        # Detailsから約定明細を取得（約定時刻・約定価格）
+        details = order.get("Details")
+        exec_time = ""
+        exec_price = avg_price
+        if isinstance(details, list):
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                # RecType 8 = 約定 (フィル済み)
+                rec_type = d.get("RecType")
+                if rec_type in (8, "8", 3, "3"):
+                    t_time = str(d.get("TransactTime") or "")
+                    if t_time:
+                        # "2026-02-18T10:30:05+09:00" → "10:30:05"
+                        try:
+                            exec_time = t_time[11:19] if len(t_time) >= 19 else t_time
+                        except Exception:
+                            exec_time = t_time
+                    d_price = d.get("Price")
+                    if isinstance(d_price, (int, float)) and d_price > 0:
+                        exec_price = float(d_price)
+                    break  # 最初の約定明細を使用
+
+        # 約定時刻が取れない場合はRecvTimeから抽出
+        if not exec_time and recv_time and len(recv_time) >= 19:
+            try:
+                exec_time = recv_time[11:19]
+            except Exception:
+                exec_time = ""
+
+        executions.append({
+            "time": exec_time,
+            "symbol": symbol,
+            "name": symbol_name,
+            "price": exec_price,
+            "qty": int(cum_qty),
+            "side": side_label,
+            "trade_type": trade_type,
+        })
+
+    # 時刻順でソート
+    executions.sort(key=lambda x: x.get("time", ""))
+    return executions
+
+
+def build_email_html(stats: Dict[str, Any], time_label: str, executions: Optional[List[Dict[str, Any]]] = None) -> str:
     """進捗メールのHTML本文を生成する。
 
     Args:
@@ -3320,6 +3452,9 @@ def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
     symbols_str = ", ".join(stats["interval_symbols"]) if stats["interval_symbols"] else "―"
     interval_pnl = stats["interval_pnl"]
     daily_pnl = stats["daily_pnl"]
+    if executions is None:
+        executions = []
+    env_settings = _collect_env_settings()
 
     # 損益の色設定
     def _pnl_color(v: float) -> str:
@@ -3333,6 +3468,35 @@ def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
         sign = "+" if v > 0 else ""
         return f"{sign}{v:,.0f} 円"
 
+    # --- 約定履歴テーブル行を生成 ---
+    trades_rows = ""
+    if executions:
+        for i, t in enumerate(executions):
+            bg = ' style="background-color:#f9fafb;"' if i % 2 == 1 else ''
+            side_str = t.get("side", "")
+            side_color = "#2563eb" if side_str == "買" else "#dc2626"
+            tt = t.get("trade_type", "")
+            tt_color = "#059669" if tt == "新規" else "#7c3aed" if tt == "返済" else "#374151"
+            price_val = t.get("price", 0)
+            price_str = f"{price_val:,.1f}" if isinstance(price_val, float) and price_val > 0 else "―"
+            trades_rows += f'''<tr{bg}>
+  <td style="padding:6px 4px;font-size:12px;color:#374151;white-space:nowrap;">{t.get("time","")}</td>
+  <td style="padding:6px 4px;font-size:12px;color:#374151;">{t.get("symbol","")}</td>
+  <td style="padding:6px 4px;font-size:12px;color:#374151;">{t.get("name","")}</td>
+  <td style="padding:6px 4px;font-size:12px;color:#374151;text-align:right;">{price_str}</td>
+  <td style="padding:6px 4px;font-size:12px;color:{side_color};font-weight:600;text-align:center;">{side_str}</td>
+  <td style="padding:6px 4px;font-size:12px;color:{tt_color};font-weight:600;text-align:center;">{tt}</td>
+  <td style="padding:6px 4px;font-size:12px;color:#374151;text-align:right;">{t.get("qty", 0)}</td>
+</tr>\n'''
+    else:
+        trades_rows = '<tr><td colspan="7" style="padding:12px;font-size:13px;color:#9ca3af;text-align:center;">約定履歴はありません</td></tr>\n'
+
+    # --- 環境変数テーブル行を生成 ---
+    env_rows = ""
+    for i, ev in enumerate(env_settings):
+        bg = ' style="background-color:#f9fafb;"' if i % 2 == 1 else ''
+        env_rows += f'<tr{bg}><td style="padding:4px 6px;font-size:11px;color:#6b7280;font-family:monospace;">{ev["key"]}</td><td style="padding:4px 6px;font-size:11px;color:#111827;font-family:monospace;word-break:break-all;">{ev["value"]}</td></tr>\n'
+
     html = f"""\
 <!DOCTYPE html>
 <html lang="ja">
@@ -3344,7 +3508,7 @@ def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
 <body style="margin:0; padding:0; background-color:#f3f4f6; font-family:'Segoe UI','Helvetica Neue','メイリオ',sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f3f4f6; padding:24px 0;">
 <tr><td align="center">
-<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); overflow:hidden;">
 
 <!-- Header -->
 <tr>
@@ -3381,13 +3545,46 @@ def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
 
 <!-- 本日累計 -->
 <tr>
-<td style="padding:16px 28px 24px;">
+<td style="padding:16px 28px 8px;">
   <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">📅 本日の累計</h2>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr>
       <td style="padding:10px 12px; font-size:14px; color:#6b7280; background-color:{_pnl_color(daily_pnl)}10; border-radius:8px 0 0 8px;">累計確定損益</td>
       <td style="padding:10px 12px; font-size:20px; font-weight:700; text-align:right; color:{_pnl_color(daily_pnl)}; background-color:{_pnl_color(daily_pnl)}10; border-radius:0 8px 8px 0;">{_pnl_str(daily_pnl)}</td>
     </tr>
+  </table>
+</td>
+</tr>
+
+<!-- 約定履歴 -->
+<tr>
+<td style="padding:16px 28px 8px;">
+  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">📋 本日の約定履歴</h2>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+    <tr style="background-color:#1e3a5f;">
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:left;font-weight:600;">時刻</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:left;font-weight:600;">コード</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:left;font-weight:600;">銘柄名</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:right;font-weight:600;">約定価格</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:center;font-weight:600;">売買</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:center;font-weight:600;">取引区分</th>
+      <th style="padding:8px 4px;font-size:11px;color:#ffffff;text-align:right;font-weight:600;">数量</th>
+    </tr>
+    {trades_rows}
+  </table>
+</td>
+</tr>
+
+<!-- 環境変数 -->
+<tr>
+<td style="padding:16px 28px 24px;">
+  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">⚙ 現在の設定値</h2>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+    <tr style="background-color:#374151;">
+      <th style="padding:6px;font-size:11px;color:#ffffff;text-align:left;font-weight:600;width:50%;">設定名</th>
+      <th style="padding:6px;font-size:11px;color:#ffffff;text-align:left;font-weight:600;">値</th>
+    </tr>
+    {env_rows}
   </table>
 </td>
 </tr>
@@ -3408,12 +3605,13 @@ def build_email_html(stats: Dict[str, Any], time_label: str) -> str:
     return html
 
 
-def send_progress_email(stats: Dict[str, Any], time_label: str) -> bool:
+def send_progress_email(stats: Dict[str, Any], time_label: str, token: Optional[str] = None) -> bool:
     """進捗メールをSMTP経由で送信する。
 
     Args:
         stats: 統計データ辞書。
         time_label: 送信時刻ラベル。
+        token: KabuStation APIトークン（約定履歴取得用）。
 
     Returns:
         bool: 送信成功ならTrue。
@@ -3422,9 +3620,13 @@ def send_progress_email(stats: Dict[str, Any], time_label: str) -> bool:
         print("[EMAIL] SMTP認証情報または宛先が未設定のためメール送信スキップ")
         return False
 
+    # APIから本日の約定履歴を取得
+    executions = _fetch_todays_executions(token)
+    print(f"[EMAIL] 約定履歴取得: {len(executions)}件")
+
     today_str = datetime.datetime.now().strftime("%Y/%m/%d")
     subject = f"[トレード進捗] {today_str} {time_label}"
-    html_body = build_email_html(stats, time_label)
+    html_body = build_email_html(stats, time_label, executions=executions)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -4342,8 +4544,10 @@ def main():
                         watchlist[symbol] = state
 
                         # 早期終了判定（値動き・出来高変化が乏しい場合は監視解除）
+                        # 手動監視銘柄は早期終了の対象外とする
                         if (
-                            WATCH_EARLY_STOP_SECONDS > 0
+                            state.get("source") != "manual"
+                            and WATCH_EARLY_STOP_SECONDS > 0
                             and (now - state.get("added_at", now)) >= WATCH_EARLY_STOP_SECONDS
                             and (abs(price_pct) < WATCH_EARLY_STOP_PRICE_PCT)
                             and (abs(volume_mult - 1.0) < WATCH_EARLY_STOP_VOLUME_MULT_DELTA)
@@ -4664,6 +4868,9 @@ def main():
                                     break
 
                             prev = held_positions.get(sym) or {}
+                            # 銘柄名の取得（SymbolNameキーがあれば使用、なければ前回値を引き継ぐ）
+                            sym_name = p.get("SymbolName") or p.get("symbolName") or prev.get("symbol_name") or ""
+
                             new_held[sym] = {
                                 **prev,
                                 "avg_price": avg,
@@ -4672,6 +4879,7 @@ def main():
                                 "cash_margin": cm_i,
                                 "margin_trade_type": mtt_i,
                                 "current_price": cur_price,
+                                "symbol_name": sym_name,
                                 "seen_at": float(now),
                                 "first_seen_at": float(prev.get("first_seen_at") or now),
                                 "stagnation_exit_streak": int(prev.get("stagnation_exit_streak") or 0),
@@ -4899,7 +5107,7 @@ def main():
                 now_hhmm = now_dt_email.strftime("%H:%M")
                 if now_hhmm in EMAIL_SCHEDULE_TIMES and now_hhmm != email_stats.get("_last_sent_hhmm"):
                     try:
-                        send_progress_email(email_stats, now_hhmm)
+                        send_progress_email(email_stats, now_hhmm, token=kabus_token)
                     except Exception as e:
                         print(f"[EMAIL] メール送信で例外発生: {e}")
                     email_stats["_last_sent_hhmm"] = now_hhmm
