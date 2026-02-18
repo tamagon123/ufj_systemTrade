@@ -449,6 +449,12 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "寄り付き直後の新規発注抑止時間（分）。前場09:00からN分・後場12:30からN分に適用します。",
     },
     {
+        "key": "ORDER_CUTOFF_HHMM",
+        "default": "15:00",
+        "type": "str",
+        "desc": "新規建のカットオフ時刻(HH:MM)。この時刻以降は新規注文を行いません（決済注文は除く）。空欄で無効。",
+    },
+    {
         "key": "AUTO_EXIT_ENABLE",
         "default": "0",
         "type": "bool",

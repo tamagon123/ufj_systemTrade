@@ -45,6 +45,44 @@ def _load_dotenv(path: str = ".env") -> None:
     except Exception:
         return
 
+def _save_to_dotenv(updates: Dict[str, str], path: str = ".env") -> None:
+    """GUIで変更された設定値を.envファイルに書き戻す関数。
+
+    既存の行のKEYが updates に含まれていれば値を更新し、
+    存在しないKEYは末尾に追記する。コメント行や空行は保持する。
+
+    Args:
+        updates (Dict[str, str]): {キー名: 新しい値} の辞書。
+        path (str): .envファイルパス。
+    """
+    try:
+        lines: list = []
+        updated_keys: set = set()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+        new_lines = []
+        for raw in lines:
+            stripped = raw.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k = stripped.split("=", 1)[0].strip()
+                if k in updates:
+                    new_lines.append(f"{k}={updates[k]}\n")
+                    updated_keys.add(k)
+                    continue
+            new_lines.append(raw)
+
+        # 既存になかったキーを末尾に追記
+        for k, v in updates.items():
+            if k not in updated_keys:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        print(f"[ENV] .env書き込みエラー: {e}")
+
 
 # exe化時にも実行ファイルと同階層を基準にするためのベースディレクトリ
 _BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -179,6 +217,9 @@ PM_OPENING_CRASH_VOLUME_MULTIPLIER = float(os.environ.get("PM_OPENING_CRASH_VOLU
 # 寄り付き直後の発注抑止（前場/後場）
 OPENING_ORDER_SUPPRESS_ENABLE = (os.environ.get("OPENING_ORDER_SUPPRESS_ENABLE") or "1").strip() in {"1", "true", "True"}
 OPENING_ORDER_SUPPRESS_MINUTES = int(os.environ.get("OPENING_ORDER_SUPPRESS_MINUTES", "10"))
+
+# 新規建カットオフ時刻（この時刻以降は新規注文を行わない。決済注文は除く）
+ORDER_CUTOFF_HHMM = (os.environ.get("ORDER_CUTOFF_HHMM") or "15:00").strip()
 
 # GUIを有効にするかどうか
 ENABLE_GUI = (os.environ.get("ENABLE_GUI") or "").strip() in {"1", "true", "True"}
@@ -1888,6 +1929,20 @@ def kabus_get_positions(token: str, product: int = 0, symbol: str = "", side: st
     qs = "&".join(params)
     return kabus_api_request("GET", f"/kabusapi/positions?{qs}", token=token)
 
+def kabus_get_ranking(token: str, ranking_type: int = 6, exchange_division: str = "ALL") -> Tuple[int, Any]:
+    """KabuStation APIのランキング情報を取得する関数。
+
+    Args:
+        token (str): APIトークン。
+        ranking_type (int): ランキング種別。4=売買代金, 5=ティック数, 6=出来高急増。
+        exchange_division (str): 市場区分。ALL=全市場, T=東証全体。
+
+    Returns:
+        tuple: (ステータスコード, レスポンスデータ)
+    """
+    qs = f"type={int(ranking_type)}&ExchangeDivision={exchange_division}"
+    return kabus_api_request("GET", f"/kabusapi/ranking?{qs}", token=token)
+
 def calc_limit_price(current_price: float, side: str, pct: float) -> float:
     """現在価格と指定した割合（%）に基づいて、指値価格を計算する関数。
 
@@ -2047,6 +2102,39 @@ def try_place_order(
             datetime.datetime.now().strftime("%Y%m%d"),
         )
         return
+
+    # 新規建カットオフ時刻チェック（決済注文は除く）
+    if ORDER_CUTOFF_HHMM and (not is_exit):
+        try:
+            _cutoff_h, _cutoff_m = map(int, ORDER_CUTOFF_HHMM.split(":"))
+            _now_jst = datetime.datetime.now(JST)
+            _cutoff_time = _now_jst.replace(hour=_cutoff_h, minute=_cutoff_m, second=0, microsecond=0)
+            if _now_jst >= _cutoff_time:
+                print(f"[ORDER] {ORDER_CUTOFF_HHMM}以降のため新規建を抑止: {sym} ({reason})")
+                try:
+                    event_queue.put_nowait({"kind": "event", "text": f"カットオフ order {sym}", "symbol": sym, "price": current_price})
+                except Exception:
+                    pass
+                append_order_log(
+                    {
+                        "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
+                        "symbol": sym,
+                        "side": sd,
+                        "qty": int(settings.get("qty") or 0),
+                        "order_type": str(settings.get("order_type") or ""),
+                        "limit_price": "",
+                        "cash_margin": str(settings.get("cash_margin") or ""),
+                        "reason": reason,
+                        "dry_run": bool(settings.get("dry_run")),
+                        "status": "",
+                        "result": "cutoff_suppressed",
+                        "payload": "",
+                    },
+                    datetime.datetime.now().strftime("%Y%m%d"),
+                )
+                return
+        except (ValueError, TypeError):
+            pass
 
     qty = int(settings.get("qty") or 0)
     if qty <= 0:
@@ -2676,6 +2764,250 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
 
     tk.Button(topbar, text="ヘルプ", command=open_help).pack(side="right")
 
+    # ランキングウィンドウ表示処理
+    def open_ranking_window():
+        from tkinter import ttk
+
+        # トークン取得
+        try:
+            _rk_token = kabus_get_token()
+        except Exception as e:
+            messagebox.showerror("エラー", f"KabuStation APIトークン取得失敗:\n{e}")
+            return
+
+        w = tk.Toplevel(root)
+        w.title("ランキング（出来高急増 / 売買代金 / ティック数）")
+        w.geometry("720x620")
+        w.resizable(True, True)
+
+        # ランキングタイプ定義: (表示名, APIのType値, 値列のヘッダ)
+        RANKING_TABS = [
+            ("出来高急増", 6, "出来高急増率"),
+            ("売買代金", 4, "売買代金(百万円)"),
+            ("ティック数", 5, "ティック数"),
+        ]
+
+        notebook = ttk.Notebook(w)
+        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+
+        # 全タブ共通の選択状態管理: {symbol: BooleanVar}
+        selected_vars: Dict[str, tk.BooleanVar] = {}
+        # 各タブのTreeview参照を保持
+        tab_trees: List[ttk.Treeview] = []
+        # 各タブのデータ保持用
+        tab_data: List[List[Dict[str, Any]]] = [[] for _ in RANKING_TABS]
+
+        status_var = tk.StringVar(value="")
+
+        def count_selected() -> int:
+            return sum(1 for v in selected_vars.values() if v.get())
+
+        def get_selected_symbols() -> List[str]:
+            return [sym for sym, v in selected_vars.items() if v.get()]
+
+        def build_tab(parent_frame: tk.Frame, tab_idx: int, tab_name: str, ranking_type: int, value_header: str):
+            """各タブの内容を構築する"""
+            # Treeview（表形式）
+            cols = ("no", "code", "name", "price", "change", "value")
+            tree = ttk.Treeview(parent_frame, columns=cols, show="headings", height=20, selectmode="none")
+
+            tree.heading("no", text="No")
+            tree.heading("code", text="コード")
+            tree.heading("name", text="銘柄名")
+            tree.heading("price", text="現在値")
+            tree.heading("change", text="前日比%")
+            tree.heading("value", text=value_header)
+
+            tree.column("no", width=35, anchor="center")
+            tree.column("code", width=55, anchor="center")
+            tree.column("name", width=200, anchor="w")
+            tree.column("price", width=80, anchor="e")
+            tree.column("change", width=70, anchor="e")
+            tree.column("value", width=120, anchor="e")
+
+            sb = ttk.Scrollbar(parent_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            tree.pack(side="left", fill="both", expand=True)
+
+            tab_trees.append(tree)
+
+            # チェックボックス的なトグル: タグで背景色を切り替え
+            tree.tag_configure("selected", background="#cce5ff")
+            tree.tag_configure("normal", background="")
+
+            def on_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+                vals = tree.item(item_id, "values")
+                if not vals:
+                    return
+                symbol = str(vals[1])  # code列
+                if symbol not in selected_vars:
+                    return
+
+                bvar = selected_vars[symbol]
+                if bvar.get():
+                    # 選択解除
+                    bvar.set(False)
+                    tree.item(item_id, tags=("normal",))
+                else:
+                    # 選択数チェック
+                    if count_selected() >= 5:
+                        messagebox.showwarning("選択上限", "最大5銘柄まで選択できます。\n他の銘柄の選択を解除してください。")
+                        return
+                    bvar.set(True)
+                    tree.item(item_id, tags=("selected",))
+
+                # ステータス更新
+                sel = get_selected_symbols()
+                status_var.set(f"選択中: {len(sel)}/5  ({', '.join(sel)})" if sel else "")
+
+            tree.bind("<Button-1>", on_click)
+
+        def load_ranking_data():
+            """全タブのランキングデータを取得して表示する"""
+            status_var.set("ランキングデータ取得中...")
+            w.update_idletasks()
+
+            for tab_idx, (tab_name, ranking_type, value_header) in enumerate(RANKING_TABS):
+                tree = tab_trees[tab_idx]
+                # 既存データをクリア
+                for item in tree.get_children():
+                    tree.delete(item)
+                tab_data[tab_idx] = []
+
+                try:
+                    status, payload = kabus_get_ranking(_rk_token, ranking_type=ranking_type)
+                except Exception as e:
+                    status_var.set(f"エラー: {e}")
+                    continue
+
+                if status != 200:
+                    status_var.set(f"API エラー (Type={ranking_type}): status={status}")
+                    continue
+
+                # レスポンスから Ranking 配列を取得
+                items = []
+                if isinstance(payload, dict):
+                    items = payload.get("Ranking", []) or []
+                if not isinstance(items, list):
+                    items = []
+
+                # 最大30件
+                for rank_no, item in enumerate(items[:30], 1):
+                    symbol_raw = str(item.get("Symbol") or item.get("Code") or "").strip()
+                    # 銘柄コードは4桁数字部分のみ取得（例: "7203" を抽出）
+                    sym_match = re.match(r"(\d{4})", symbol_raw)
+                    symbol = sym_match.group(1) if sym_match else symbol_raw
+
+                    name = str(item.get("SymbolName") or item.get("Name") or "").strip()
+                    # 現在値
+                    price_val = item.get("CurrentPrice") or item.get("Price") or item.get("LastPrice") or 0
+                    try:
+                        price_f = float(price_val)
+                        price_str = f"{price_f:,.1f}" if price_f else "-"
+                    except (ValueError, TypeError):
+                        price_str = str(price_val)
+
+                    # 前日比%
+                    change_pct = item.get("ChangePercentage") or item.get("ChangePriceRate") or item.get("ChangeRatio") or 0
+                    try:
+                        change_f = float(change_pct)
+                        change_str = f"{change_f:+.2f}%"
+                    except (ValueError, TypeError):
+                        change_str = str(change_pct)
+
+                    # ランキング固有の値
+                    if ranking_type == 6:  # 出来高急増
+                        rv = item.get("RapidTradePercentage") or item.get("TradingVolumeRate") or item.get("Turnover") or ""
+                        try:
+                            value_str = f"{float(rv):,.1f}%"
+                        except (ValueError, TypeError):
+                            value_str = str(rv)
+                    elif ranking_type == 4:  # 売買代金
+                        rv = item.get("TradingValue") or item.get("Turnover") or ""
+                        try:
+                            value_str = f"{float(rv) / 1_000_000:,.0f}"
+                        except (ValueError, TypeError):
+                            value_str = str(rv)
+                    elif ranking_type == 5:  # ティック数
+                        rv = item.get("TickCount") or item.get("Ticks") or ""
+                        try:
+                            value_str = f"{int(float(rv)):,}"
+                        except (ValueError, TypeError):
+                            value_str = str(rv)
+                    else:
+                        value_str = ""
+
+                    # BooleanVar を登録（まだなければ）
+                    if symbol and symbol not in selected_vars:
+                        selected_vars[symbol] = tk.BooleanVar(value=False)
+
+                    tree.insert("", "end", values=(rank_no, symbol, name, price_str, change_str, value_str), tags=("normal",))
+                    tab_data[tab_idx].append({"symbol": symbol, "name": name})
+
+            sel = get_selected_symbols()
+            status_var.set(f"取得完了  選択中: {len(sel)}/5" if not sel else f"取得完了  選択中: {len(sel)}/5  ({', '.join(sel)})")
+
+        # 各タブを作成
+        for tab_idx, (tab_name, ranking_type, value_header) in enumerate(RANKING_TABS):
+            tab_frame = tk.Frame(notebook)
+            notebook.add(tab_frame, text=f" {tab_name} ")
+            build_tab(tab_frame, tab_idx, tab_name, ranking_type, value_header)
+
+        # ステータスバー
+        tk.Label(w, textvariable=status_var, anchor="w", fg="blue").pack(fill="x", padx=8, pady=(4, 0))
+
+        # ボタンエリア
+        btn_frame = tk.Frame(w)
+        btn_frame.pack(fill="x", padx=8, pady=8)
+
+        def on_refresh():
+            # 選択状態をリセット
+            selected_vars.clear()
+            load_ranking_data()
+
+        def on_apply():
+            sel_syms = get_selected_symbols()
+            if not sel_syms:
+                messagebox.showwarning("未選択", "銘柄が選択されていません。\n行をクリックして選択してください。")
+                return
+
+            # 手動監視銘柄エントリを書き換え（最大5スロット）
+            for i, e in enumerate(mw_entries):
+                e.delete(0, "end")
+                if i < len(sel_syms):
+                    e.insert(0, sel_syms[i])
+
+            # command_queue に manual_watch コマンドを送信
+            slots = []
+            for i in range(5):
+                sym = sel_syms[i] if i < len(sel_syms) else ""
+                slots.append({"slot": i, "symbol": sym})
+            try:
+                command_queue.put_nowait({"kind": "manual_watch", "slots": slots})
+            except Exception:
+                pass
+
+            # 実行ログに記録
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            desc = ", ".join(sel_syms)
+            _append_exec_log(f"[{ts}] ランキングから手動監視銘柄を設定: {desc}")
+
+            messagebox.showinfo("適用完了", f"手動監視銘柄を設定しました:\n{desc}")
+            w.destroy()
+
+        tk.Button(btn_frame, text="更新", command=on_refresh, width=10).pack(side="left", padx=(0, 6))
+        tk.Button(btn_frame, text="適用（手動監視に設定）", command=on_apply, width=22).pack(side="left", padx=(0, 6))
+        tk.Button(btn_frame, text="閉じる", command=w.destroy, width=10).pack(side="right")
+
+        # 初回データ取得
+        w.after(100, load_ranking_data)
+
+    tk.Button(topbar, text="ランキング", command=open_ranking_window).pack(side="right", padx=(0, 6))
+
     # 注文設定エリア
     frm = tk.LabelFrame(container, text="注文設定")
     frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -2774,7 +3106,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Radiobutton(r4, text="指値(±%)", variable=v_order_type, value="limit_pct", command=push_settings).pack(side="left")
     tk.Label(r4, text="%", width=2).pack(side="left", padx=(10, 0))
     tk.Entry(r4, textvariable=v_limit_pct, width=6).pack(side="left")
-    tk.Button(r4, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
+
 
     r5 = tk.Frame(frm)
     r5.pack(fill="x", padx=6, pady=4)
@@ -2782,7 +3114,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Entry(r5, textvariable=v_qty, width=8).pack(side="left")
     tk.Label(r5, text="出来高倍率", width=10, anchor="e").pack(side="left", padx=(12, 0))
     tk.Entry(r5, textvariable=v_vol_mult, width=6).pack(side="left")
-    tk.Button(r5, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
+
 
     r5b = tk.Frame(frm)
     r5b.pack(fill="x", padx=6, pady=4)
@@ -2792,14 +3124,14 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Label(r5b, text="上限", width=4, anchor="e").pack(side="left", padx=(12, 0))
     tk.Entry(r5b, textvariable=v_price_max, width=8).pack(side="left")
     tk.Label(r5b, text="(0=制限なし)", width=12, anchor="w").pack(side="left", padx=(6, 0))
-    tk.Button(r5b, text="反映", command=push_settings).pack(side="left", padx=4)
+
 
     r5c = tk.Frame(frm)
     r5c.pack(fill="x", padx=6, pady=4)
     tk.Label(r5c, text="出来高下限", width=14, anchor="w").pack(side="left")
     tk.Entry(r5c, textvariable=v_base_vol_min, width=10).pack(side="left")
     tk.Label(r5c, text="(急増前の出来高, 0=制限なし)", anchor="w").pack(side="left", padx=(6, 0))
-    tk.Button(r5c, text="反映", command=push_settings).pack(side="left", padx=4)
+
 
     r6 = tk.Frame(frm)
     r6.pack(fill="x", padx=6, pady=4)
@@ -2824,7 +3156,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Entry(r6c, textvariable=v_stag_vol_mult, width=6).pack(side="left")
     tk.Label(r6c, text="連続", width=6, anchor="e").pack(side="left", padx=(10, 0))
     tk.Entry(r6c, textvariable=v_stag_hits, width=4).pack(side="left")
-    tk.Button(r6c, text="反映", command=lambda: _on_push_settings_with_log()).pack(side="left", padx=4)
+
 
     r7 = tk.Frame(frm)
     r7.pack(fill="x", padx=6, pady=8)
@@ -2833,6 +3165,11 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Label(r7, text="価格", width=6, anchor="e").pack(side="left")
     tk.Label(r7, textvariable=last_price_var, width=10, anchor="w").pack(side="left")
     tk.Button(r7, text="手動発注", command=on_place_order).pack(side="right")
+
+    # 注文設定の反映ボタン（1つに集約）
+    r_apply = tk.Frame(frm)
+    r_apply.pack(fill="x", padx=6, pady=(4, 8))
+    tk.Button(r_apply, text="注文設定を反映", command=lambda: _on_push_settings_with_log(), width=20).pack(side="right")
 
     # 手動監視銘柄エリア（最大5銘柄）
     mw_frm = tk.LabelFrame(container, text="手動監視銘柄（最大5銘柄・常時出来高監視）")
@@ -2929,22 +3266,56 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         changes.append(f"出来高倍={v_stag_vol_mult.get()}")
         changes.append(f"連続={v_stag_hits.get()}")
         push_settings()
-        _append_exec_log(f"[{ts}] 注文設定を反映しました: {', '.join(changes)}")
+
+        # .envファイルにも書き戻す
+        env_updates = {
+            "ORDER_MODE": v_mode.get(),
+            "ORDER_SIDE_MODE": v_side_mode.get(),
+            "ORDER_CASH_MARGIN": v_cash_margin.get(),
+            "ORDER_TYPE": v_order_type.get(),
+            "ORDER_LIMIT_PCT": v_limit_pct.get(),
+            "ORDER_QTY": v_qty.get(),
+            "ORDER_DRY_RUN": "1" if v_dry.get() else "0",
+            "ORDER_CONFIRM": "1" if v_confirm.get() else "0",
+            "ORDER_VOLUME_MULTIPLIER": v_vol_mult.get(),
+            "ORDER_PRICE_MIN": v_price_min.get(),
+            "ORDER_PRICE_MAX": v_price_max.get(),
+            "ORDER_BASE_VOLUME_MIN": v_base_vol_min.get(),
+            "AUTO_EXIT_ENABLE": "1" if v_auto_exit.get() else "0",
+            "AUTO_EXIT_PROFIT_YEN_PER_100": v_profit_yen.get(),
+            "AUTO_EXIT_STOPLOSS_YEN_PER_100": v_stoploss_yen.get(),
+            "AUTO_EXIT_STAGNATION_SECONDS": v_stag_secs.get(),
+            "AUTO_EXIT_STAGNATION_PRICE_PCT": v_stag_price_pct.get(),
+            "AUTO_EXIT_STAGNATION_VOLUME_MULT": v_stag_vol_mult.get(),
+            "AUTO_EXIT_STAGNATION_HITS": v_stag_hits.get(),
+        }
+        _save_to_dotenv(env_updates, os.path.join(_BASE_DIR, ".env"))
+
+        _append_exec_log(f"[{ts}] 注文設定を反映しました（.env同期済）: {', '.join(changes)}")
         _deselect_all_entries()
-        messagebox.showinfo("反映完了", "注文設定の反映が完了しました。")
+        messagebox.showinfo("反映完了", "注文設定の反映が完了しました。\n(.envファイルも更新されました)")
 
     def _on_apply_manual_watch_with_log():
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         syms = []
+        sym_codes = []
         for i, e in enumerate(mw_entries):
             v = e.get().strip()
             if v:
                 syms.append(f"スロット{i+1}={v.upper()}")
+                sym_codes.append(v.upper())
         on_apply_manual_watch()
+
+        # .envファイルにも書き戻す
+        _save_to_dotenv(
+            {"MANUAL_WATCH_SYMBOLS": ",".join(sym_codes)},
+            os.path.join(_BASE_DIR, ".env"),
+        )
+
         desc = ", ".join(syms) if syms else "(全スロット空)"
-        _append_exec_log(f"[{ts}] 手動監視銘柄を反映しました: {desc}")
+        _append_exec_log(f"[{ts}] 手動監視銘柄を反映しました（.env同期済）: {desc}")
         _deselect_all_entries()
-        messagebox.showinfo("反映完了", "手動監視銘柄の反映が完了しました。")
+        messagebox.showinfo("反映完了", "手動監視銘柄の反映が完了しました。\n(.envファイルも更新されました)")
 
     # メインスレッドからのイベント通知を監視するループ
     def poll_queue():
