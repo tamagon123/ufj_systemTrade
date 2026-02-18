@@ -264,10 +264,10 @@ EMAIL_SMTP_USER = os.environ.get("EMAIL_SMTP_USER", "")
 EMAIL_SMTP_PASSWORD = os.environ.get("EMAIL_SMTP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 
-# メール送信スケジュール (前場: 9:30-11:30, 後場: 13:00-15:30)
+# メール送信スケジュール (前場: 9:00-11:30, 後場: 12:30-15:30 の毎00分/30分)
 EMAIL_SCHEDULE_TIMES = [
-    "09:30", "10:00", "10:30", "11:00", "11:30",
-    "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
+    "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+    "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
 ]
 
 # -----------------------------------------------------------------------------
@@ -3698,6 +3698,98 @@ def _collect_env_settings() -> List[Dict[str, str]]:
     return items
 
 
+def _compute_daily_pnl(token: Optional[str], executions: Optional[List[Dict[str, Any]]] = None) -> Tuple[float, float]:
+    """APIデータから本日の損益を計算する。
+
+    ① 保有ポジション(positions API)から含み損益を取得
+    ② 約定履歴から返済（決済）トレードの実現損益を計算
+
+    Args:
+        token: KabuStation APIトークン。
+        executions: _fetch_todays_executions の戻り値。Noneなら再取得。
+
+    Returns:
+        (realized_pnl, unrealized_pnl) のタプル。
+    """
+    realized_pnl = 0.0
+    unrealized_pnl = 0.0
+
+    if not token:
+        return realized_pnl, unrealized_pnl
+
+    # --- 含み損益: 現在保有ポジションの ProfitLoss を合算 ---
+    try:
+        st_pos, pos_data = kabus_get_positions(token, product=0, addinfo=True)
+        if st_pos == 200 and isinstance(pos_data, list):
+            for pos in pos_data:
+                if not isinstance(pos, dict):
+                    continue
+                pnl_val = pos.get("ProfitLoss")
+                if isinstance(pnl_val, (int, float)):
+                    unrealized_pnl += float(pnl_val)
+    except Exception as e:
+        print(f"[EMAIL] ポジション損益取得例外: {e}")
+
+    # --- 実現損益: 返済注文から計算 ---
+    # KabuStation orders APIから直接計算
+    try:
+        st_ord, orders = kabus_get_orders(token, product=0, state="5")
+        if st_ord == 200 and isinstance(orders, list):
+            today_str = datetime.datetime.now(JST).strftime("%Y%m%d")
+            for order in orders:
+                if not isinstance(order, dict):
+                    continue
+                # 本日の注文のみ
+                recv_time = str(order.get("RecvTime") or "")
+                if recv_time and not recv_time.startswith(f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:8]}"):
+                    continue
+                # 約定数量 > 0
+                cum_qty = order.get("CumQty") or 0
+                if not isinstance(cum_qty, (int, float)) or cum_qty <= 0:
+                    continue
+                # CashMargin=3 (返済) のみが実現損益を生む
+                cash_margin = order.get("CashMargin")
+                if cash_margin not in (3, "3"):
+                    continue
+
+                # 約定価格
+                exec_price = float(order.get("Price") or 0)
+                details = order.get("Details")
+                if isinstance(details, list):
+                    for d in details:
+                        if isinstance(d, dict) and d.get("RecType") in (8, "8", 3, "3"):
+                            dp = d.get("Price")
+                            if isinstance(dp, (int, float)) and dp > 0:
+                                exec_price = float(dp)
+                            break
+
+                # ClosePositionsから建値を取得して実現損益を計算
+                close_positions = order.get("ClosePositions")
+                if isinstance(close_positions, list):
+                    side_raw = order.get("Side")  # 1=売, 2=買
+                    for cp in close_positions:
+                        if not isinstance(cp, dict):
+                            continue
+                        cp_qty = cp.get("Qty") or 0
+                        cp_price = cp.get("Price") or 0  # 建値
+                        if not isinstance(cp_qty, (int, float)) or cp_qty <= 0:
+                            continue
+                        if not isinstance(cp_price, (int, float)) or cp_price <= 0:
+                            continue
+                        # 返済側のSide=1(売) → 買建ての決済 → PnL = (売値 - 建値) × 数量
+                        # 返済側のSide=2(買) → 売建ての決済 → PnL = (建値 - 買戻し値) × 数量
+                        if side_raw in (1, "1"):
+                            realized_pnl += (exec_price - float(cp_price)) * float(cp_qty)
+                        elif side_raw in (2, "2"):
+                            realized_pnl += (float(cp_price) - exec_price) * float(cp_qty)
+                else:
+                    # ClosePositionsが無い場合はスキップ（建値が不明）
+                    pass
+    except Exception as e:
+        print(f"[EMAIL] 実現損益計算例外: {e}")
+
+    return realized_pnl, unrealized_pnl
+
 def _fetch_todays_executions(token: Optional[str]) -> List[Dict[str, Any]]:
     """本日の約定履歴をKabuStation APIから取得する。
 
@@ -3823,6 +3915,8 @@ def build_email_html(stats: Dict[str, Any], time_label: str, executions: Optiona
     symbols_str = ", ".join(stats["interval_symbols"]) if stats["interval_symbols"] else "―"
     interval_pnl = stats["interval_pnl"]
     daily_pnl = stats["daily_pnl"]
+    unrealized_pnl = stats.get("unrealized_pnl", 0.0)
+    total_pnl = daily_pnl + unrealized_pnl
     if executions is None:
         executions = []
     env_settings = _collect_env_settings()
@@ -3917,11 +4011,19 @@ def build_email_html(stats: Dict[str, Any], time_label: str, executions: Optiona
 <!-- 本日累計 -->
 <tr>
 <td style="padding:16px 28px 8px;">
-  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">📅 本日の累計</h2>
+  <h2 style="margin:0 0 14px; font-size:15px; color:#374151; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">📅 本日の損益</h2>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr>
-      <td style="padding:10px 12px; font-size:14px; color:#6b7280; background-color:{_pnl_color(daily_pnl)}10; border-radius:8px 0 0 8px;">累計確定損益</td>
-      <td style="padding:10px 12px; font-size:20px; font-weight:700; text-align:right; color:{_pnl_color(daily_pnl)}; background-color:{_pnl_color(daily_pnl)}10; border-radius:0 8px 8px 0;">{_pnl_str(daily_pnl)}</td>
+      <td style="padding:8px 12px; font-size:14px; color:#6b7280;">実現損益（確定）</td>
+      <td style="padding:8px 12px; font-size:18px; font-weight:700; text-align:right; color:{_pnl_color(daily_pnl)};">{_pnl_str(daily_pnl)}</td>
+    </tr>
+    <tr style="background-color:#f9fafb;">
+      <td style="padding:8px 12px; font-size:14px; color:#6b7280; border-radius:6px 0 0 6px;">含み損益</td>
+      <td style="padding:8px 12px; font-size:18px; font-weight:700; text-align:right; color:{_pnl_color(unrealized_pnl)}; border-radius:0 6px 6px 0;">{_pnl_str(unrealized_pnl)}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px 12px; font-size:14px; color:#6b7280; background-color:{_pnl_color(total_pnl)}10; border-radius:8px 0 0 8px; font-weight:600;">合計</td>
+      <td style="padding:10px 12px; font-size:20px; font-weight:700; text-align:right; color:{_pnl_color(total_pnl)}; background-color:{_pnl_color(total_pnl)}10; border-radius:0 8px 8px 0;">{_pnl_str(total_pnl)}</td>
     </tr>
   </table>
 </td>
@@ -3994,6 +4096,12 @@ def send_progress_email(stats: Dict[str, Any], time_label: str, token: Optional[
     # APIから本日の約定履歴を取得
     executions = _fetch_todays_executions(token)
     print(f"[EMAIL] 約定履歴取得: {len(executions)}件")
+
+    # APIから損益を都度計算（内部蓄積値に依存しない）
+    realized_pnl, unrealized_pnl = _compute_daily_pnl(token, executions)
+    print(f"[EMAIL] 損益計算(API): 実現={realized_pnl:+,.0f}円, 含み={unrealized_pnl:+,.0f}円")
+    stats["daily_pnl"] = realized_pnl
+    stats["unrealized_pnl"] = unrealized_pnl
 
     today_str = datetime.datetime.now().strftime("%Y/%m/%d")
     subject = f"[トレード進捗] {today_str} {time_label}"
