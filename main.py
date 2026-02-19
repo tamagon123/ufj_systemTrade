@@ -1661,6 +1661,12 @@ def get_company_name_from_symbol(symbol: str, index_rows: List[Tuple[str, str]])
     return ""
 
 
+def _count_auto_watchlist(watchlist: Dict[str, Any]) -> int:
+    """watchlist内の自動検知銘柄数を返す（source="manual"を除外）。
+    WATCH_MAX_SYMBOLSの上限判定に使用し、手動監視銘柄がスロットを圧迫しないようにする。"""
+    return sum(1 for st in watchlist.values() if st.get("source") != "manual")
+
+
 def notify_watchlist_change(watchlist: Dict[str, Any], edinet_company_index: List[Tuple[str, str]], event_queue: "queue.Queue") -> None:
     """watchlistの変更をGUIに通知する。"""
     if not watchlist:
@@ -4720,7 +4726,7 @@ def main():
             # 昼休み(11:30-12:30)に検知した銘柄は12:30にまとめて監視開始
             if pending_watchlist and pending_release_at > 0 and now >= pending_release_at:
                 for sym in list(pending_watchlist.keys()):
-                    if WATCH_MAX_SYMBOLS > 0 and len(watchlist) >= WATCH_MAX_SYMBOLS:
+                    if WATCH_MAX_SYMBOLS > 0 and _count_auto_watchlist(watchlist) >= WATCH_MAX_SYMBOLS:
                         break
                     if sym not in watchlist:
                         watchlist[sym] = pending_watchlist[sym]
@@ -4925,7 +4931,7 @@ def main():
                         if symbol:
                             in_lunch, release_at = is_lunch_batch_window(datetime.datetime.now(JST))
                             # 監視上限数チェック
-                            if (not in_lunch) and WATCH_MAX_SYMBOLS > 0 and len(watchlist) >= WATCH_MAX_SYMBOLS:
+                            if (not in_lunch) and WATCH_MAX_SYMBOLS > 0 and _count_auto_watchlist(watchlist) >= WATCH_MAX_SYMBOLS:
                                 continue
 
                             # 初期状態の設定
@@ -5042,7 +5048,7 @@ def main():
                         # 証券コードが判明していれば watchlist に追加
                         if symbol and symbol not in watchlist:
                             in_lunch, release_at = is_lunch_batch_window(datetime.datetime.now(JST))
-                            if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or len(watchlist) < WATCH_MAX_SYMBOLS):
+                            if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
                                 edinet_key = f"edinet_{doc_id}"
                                 st = {
                                     "tdnet_key": edinet_key,
@@ -5185,7 +5191,7 @@ def main():
                     # 銘柄コードが判明していればwatchlistに追加
                     if symbol and symbol not in watchlist:
                         in_lunch, release_at = is_lunch_batch_window(datetime.datetime.now(JST))
-                        if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or len(watchlist) < WATCH_MAX_SYMBOLS):
+                        if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
                             news_key = f"news_{article_url}"
                             st = {
                                 "tdnet_key": news_key,
@@ -5527,7 +5533,7 @@ def main():
                                         cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
                                         margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
                                         profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
-                                        order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                        order_password = os.environ.get("KABUS_ORDER_PASSWORD", "") or KABUS_API_PASSWORD
                                         
                                         monitor_thread = threading.Thread(
                                             target=monitor_order_and_place_profit_limit,
@@ -5620,7 +5626,7 @@ def main():
                                                 cash_margin_str = str(order_settings.get("cash_margin") or "cash").strip().lower()
                                                 margin_trade_type_val = int(order_settings.get("margin_trade_type") or 3)
                                                 profit_yen = float(order_settings.get("profit_yen_per_100") or 0.0)
-                                                order_password = os.environ.get("KABUS_ORDER_PASSWORD", "")
+                                                order_password = os.environ.get("KABUS_ORDER_PASSWORD", "") or KABUS_API_PASSWORD
                                                 
                                                 monitor_thread = threading.Thread(
                                                     target=monitor_order_and_place_profit_limit,
