@@ -3044,6 +3044,208 @@ def reset_obi_history(symbol: str) -> None:
     if symbol in _hft_cvd:
         _hft_cvd[symbol] = 0.0
 
+# -----------------------------------------------------------------------------
+# MA（移動平均線）/ VWAP 計算関数
+# -----------------------------------------------------------------------------
+
+# 各銘柄の価格履歴を保持するグローバル辞書
+_price_history: Dict[str, List[float]] = {}
+_volume_history: Dict[str, List[float]] = {}
+_vwap_data: Dict[str, Dict[str, float]] = {}  # {symbol: {"pv_sum": 0.0, "v_sum": 0.0}}
+
+def update_price_history(symbol: str, price: float, volume: float, max_period: int = 100) -> None:
+    """価格と出来高の履歴を更新する関数。
+    
+    Args:
+        symbol (str): 証券コード
+        price (float): 現在価格
+        volume (float): 出来高
+        max_period (int): 保持する最大履歴数（デフォルト: 100）
+    """
+    if symbol not in _price_history:
+        _price_history[symbol] = []
+    if symbol not in _volume_history:
+        _volume_history[symbol] = []
+    
+    _price_history[symbol].append(price)
+    _volume_history[symbol].append(volume)
+    
+    # 最大履歴数を超えたら古いデータを削除
+    if len(_price_history[symbol]) > max_period:
+        _price_history[symbol].pop(0)
+    if len(_volume_history[symbol]) > max_period:
+        _volume_history[symbol].pop(0)
+
+def calculate_sma(symbol: str, period: int) -> Optional[float]:
+    """単純移動平均（SMA）を計算する関数。
+    
+    Args:
+        symbol (str): 証券コード
+        period (int): 移動平均の期間
+    
+    Returns:
+        Optional[float]: SMA値。履歴が不足している場合はNone。
+    """
+    if symbol not in _price_history:
+        return None
+    
+    history = _price_history[symbol]
+    if len(history) < period:
+        return None
+    
+    return sum(history[-period:]) / period
+
+def calculate_ema(symbol: str, period: int, alpha: Optional[float] = None) -> Optional[float]:
+    """指数移動平均（EMA）を計算する関数。
+    
+    Args:
+        symbol (str): 証券コード
+        period (int): 移動平均の期間
+        alpha (Optional[float]): 平滑化係数。Noneの場合は 2/(period+1) を使用。
+    
+    Returns:
+        Optional[float]: EMA値。履歴が不足している場合はNone。
+    """
+    if symbol not in _price_history:
+        return None
+    
+    history = _price_history[symbol]
+    if len(history) < period:
+        return None
+    
+    if alpha is None:
+        alpha = 2.0 / (period + 1)
+    
+    # 最初のEMAはSMAで初期化
+    ema = sum(history[:period]) / period
+    
+    # 残りのデータでEMAを計算
+    for price in history[period:]:
+        ema = (price * alpha) + (ema * (1 - alpha))
+    
+    return ema
+
+def calculate_vwap(symbol: str, price: float, volume: float, reset_daily: bool = True) -> Optional[float]:
+    """VWAP（出来高加重平均価格）を計算する関数。
+    
+    Args:
+        symbol (str): 証券コード
+        price (float): 現在価格
+        volume (float): 現在の出来高（累積）
+        reset_daily (bool): 日次でリセットするか（デフォルト: True）
+    
+    Returns:
+        Optional[float]: VWAP値。計算できない場合はNone。
+    """
+    if symbol not in _vwap_data:
+        _vwap_data[symbol] = {"pv_sum": 0.0, "v_sum": 0.0, "last_volume": 0.0}
+    
+    data = _vwap_data[symbol]
+    
+    # 出来高の増分を計算
+    volume_delta = volume - data["last_volume"]
+    if volume_delta < 0:
+        # 出来高がリセットされた（日が変わった）場合
+        data["pv_sum"] = 0.0
+        data["v_sum"] = 0.0
+        volume_delta = volume
+    
+    # 価格×出来高の累積と出来高の累積を更新
+    data["pv_sum"] += price * volume_delta
+    data["v_sum"] += volume_delta
+    data["last_volume"] = volume
+    
+    if data["v_sum"] == 0:
+        return None
+    
+    return data["pv_sum"] / data["v_sum"]
+
+def check_ma_filter(symbol: str, price: float, side: str) -> bool:
+    """移動平均線フィルタをチェックする関数。
+    
+    Args:
+        symbol (str): 証券コード
+        price (float): 現在価格
+        side (str): 売買方向（"buy" または "sell"）
+    
+    Returns:
+        bool: フィルタを通過したらTrue、通過しなかったらFalse。
+    """
+    if not MA_FILTER_ENABLE:
+        return True
+    
+    # 移動平均を計算
+    if MA_TYPE == "SMA":
+        ma_short = calculate_sma(symbol, MA_SHORT_PERIOD)
+        ma_long = calculate_sma(symbol, MA_LONG_PERIOD)
+    else:  # EMA
+        ma_short = calculate_ema(symbol, MA_SHORT_PERIOD)
+        ma_long = calculate_ema(symbol, MA_LONG_PERIOD)
+    
+    if ma_short is None or ma_long is None:
+        # 履歴不足の場合はフィルタを無効化
+        return True
+    
+    # トレンドフィルタ
+    if MA_TREND_FILTER:
+        if side == "buy" and price < ma_long:
+            return False  # 価格がMA下なら買いNG
+        if side == "sell" and price > ma_long:
+            return False  # 価格がMA上なら売りNG
+    
+    # ゴールデンクロス/デッドクロスフィルタ
+    if MA_CROSS_ENTRY:
+        if side == "buy" and ma_short <= ma_long:
+            return False  # ゴールデンクロスしていなければ買いNG
+        if side == "sell" and ma_short >= ma_long:
+            return False  # デッドクロスしていなければ売りNG
+    
+    return True
+
+def check_vwap_filter(symbol: str, price: float, side: str) -> bool:
+    """VWAPフィルタをチェックする関数。
+    
+    Args:
+        symbol (str): 証券コード
+        price (float): 現在価格
+        side (str): 売買方向（"buy" または "sell"）
+    
+    Returns:
+        bool: フィルタを通過したらTrue、通過しなかったらFalse。
+    """
+    if not VWAP_FILTER_ENABLE:
+        return True
+    
+    if symbol not in _vwap_data or _vwap_data[symbol]["v_sum"] == 0:
+        # VWAP未計算の場合はフィルタを無効化
+        return True
+    
+    vwap = _vwap_data[symbol]["pv_sum"] / _vwap_data[symbol]["v_sum"]
+    
+    # VWAP乖離率チェック
+    if VWAP_DEVIATION_PCT > 0:
+        deviation = abs((price - vwap) / vwap * 100)
+        if deviation > VWAP_DEVIATION_PCT:
+            return False  # 乖離が大きすぎる場合はNG
+    
+    # VWAP位置フィルタ
+    if VWAP_ENTRY_ABOVE:
+        if side == "buy" and price < vwap:
+            return False  # 価格がVWAP下なら買いNG
+        if side == "sell" and price > vwap:
+            return False  # 価格がVWAP上なら売りNG
+    
+    return True
+
+def reset_ma_vwap_history(symbol: str) -> None:
+    """指定銘柄のMA/VWAP履歴をリセットする関数。"""
+    if symbol in _price_history:
+        _price_history[symbol].clear()
+    if symbol in _volume_history:
+        _volume_history[symbol].clear()
+    if symbol in _vwap_data:
+        _vwap_data[symbol] = {"pv_sum": 0.0, "v_sum": 0.0, "last_volume": 0.0}
+
 def get_tdnet_disclosures():
     """
     TDnetの適時開示情報（今日の分）を取得して解析する関数。
