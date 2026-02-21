@@ -1556,59 +1556,6 @@ def load_news_aliases(path: str = "") -> Dict[str, str]:
         return {}
 
 
-def build_stock_name_dict(token: Optional[str] = None) -> Dict[str, str]:
-    """KabuStation APIの銘柄マスタから略称辞書を自動生成する関数。
-
-    正式名称から法人格（株式会社、ホールディングス、グループ等）を削除して
-    略称キーとして登録する。
-
-    Args:
-        token (str, optional): KabuStation APIトークン。Noneの場合は空辞書を返す。
-
-    Returns:
-        Dict[str, str]: {略称: 証券コード} の辞書。
-    """
-    if not token:
-        return {}
-
-    # 削除対象の法人格・サフィックス
-    STRIP_SUFFIXES = [
-        "株式会社", "(株)", "（株）", "ホールディングス", "ＨＤ", "HD",
-        "グループ", "フィナンシャル・グループ", "フィナンシャルグループ",
-        "・", "　",
-    ]
-
-    name_dict: Dict[str, str] = {}
-
-    # 主要な市場コード（東証プライム等）の銘柄を取得
-    # KabuStation APIの /kabusapi/symbolname/all は存在しないため、
-    # 個別取得は非効率。ここでは空辞書を返し、aliases.jsonに依存する。
-    # 将来的にAPIが銘柄一覧を返すようになったら拡張可能。
-    print("[NEWS] 銘柄名辞書の自動生成はaliases.jsonに依存します")
-
-    return name_dict
-
-
-def normalize_stock_name(name: str) -> str:
-    """正式名称から法人格等を削除して略称を生成する関数。
-
-    Args:
-        name (str): 正式名称。
-
-    Returns:
-        str: 正規化された略称。
-    """
-    result = name.strip()
-    for suffix in ["株式会社", "(株)", "（株）", "ホールディングス", "ＨＤ", "HD",
-                    "グループ", "フィナンシャル・グループ", "フィナンシャルグループ"]:
-        result = result.replace(suffix, "")
-    result = result.strip("・ 　\t\r\n")
-    # 短すぎるものは除外
-    if len(result) < 2:
-        return ""
-    return result
-
-
 def resolve_symbol_from_title(title: str, name_dict: Dict[str, str]) -> Tuple[str, str]:
     """記事タイトルから略称辞書を使って銘柄コードを特定する関数。
 
@@ -1842,6 +1789,63 @@ def is_lunch_batch_window(now_dt: datetime.datetime) -> Tuple[bool, float]:
         return False, 0.0
     in_window = (start <= nd < end)
     return in_window, end.timestamp()
+
+
+def is_morning_batch_window(now_dt: datetime.datetime) -> Tuple[bool, float]:
+    """今が朝バッチの『溜め込み期間』かどうかと、バッチ解放時刻(epoch)を返す。"""
+    if not MORNING_BATCH_ENABLE:
+        return False, 0.0
+
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    nd = now_dt.astimezone(jst) if now_dt.tzinfo else now_dt.replace(tzinfo=jst)
+    sh, sm = _parse_hhmm(MORNING_BATCH_START_HHMM)
+    eh, em = _parse_hhmm(MORNING_BATCH_END_HHMM)
+    
+    # 日付を跨ぐ場合の処理（例: 23:00〜翌09:00）
+    if eh < sh or (eh == sh and em < sm):
+        # 開始が前日の場合
+        if nd.hour < sh or (nd.hour == sh and nd.minute < sm):
+            start = (nd - datetime.timedelta(days=1)).replace(hour=sh, minute=sm, second=0, microsecond=0)
+        else:
+            start = nd.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = nd.replace(hour=eh, minute=em, second=0, microsecond=0)
+    else:
+        # 同日内の場合
+        start = nd.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = nd.replace(hour=eh, minute=em, second=0, microsecond=0)
+    
+    if end <= start:
+        return False, 0.0
+    in_window = (start <= nd < end)
+    return in_window, end.timestamp()
+
+
+def is_afterhours_add_stop_window(now_dt: datetime.datetime) -> bool:
+    """今が時間外停止期間（watchlistへの追加を停止）かどうかを返す。"""
+    if not AFTERHOURS_ADD_STOP_ENABLE:
+        return False
+
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    nd = now_dt.astimezone(jst) if now_dt.tzinfo else now_dt.replace(tzinfo=jst)
+    sh, sm = _parse_hhmm(AFTERHOURS_ADD_STOP_START_HHMM)
+    eh, em = _parse_hhmm(AFTERHOURS_ADD_STOP_END_HHMM)
+    
+    # 日付を跨ぐ場合の処理（例: 15:30〜翌00:00）
+    if eh < sh or (eh == sh and em < sm):
+        # 開始が前日の場合
+        if nd.hour < sh or (nd.hour == sh and nd.minute < sm):
+            start = (nd - datetime.timedelta(days=1)).replace(hour=sh, minute=sm, second=0, microsecond=0)
+        else:
+            start = nd.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = nd.replace(hour=eh, minute=em, second=0, microsecond=0)
+    else:
+        # 同日内の場合
+        start = nd.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = nd.replace(hour=eh, minute=em, second=0, microsecond=0)
+    
+    if end <= start:
+        return False
+    return start <= nd < end
 
 
 def detect_special_quote_side(board: Dict[str, Any]) -> str:
@@ -5474,7 +5478,21 @@ def main():
                                 pending_release_at = max(pending_release_at, float(release_at))
                                 print(f"[LUNCH_BATCH] TDnet検知 {symbol} → {LUNCH_BATCH_END_HHMM}まで保留")
                             else:
-                                watchlist.setdefault(symbol, st)
+                                now_dt = datetime.datetime.now(JST)
+                                in_morning, release_at_morning = is_morning_batch_window(now_dt)
+                                in_afterhours_stop = is_afterhours_add_stop_window(now_dt)
+                                
+                                # 時間外停止期間中はwatchlistに追加しない（情報収集のみ）
+                                if in_afterhours_stop:
+                                    print(f"[TDNET] 時間外停止期間中のためwatchlistに追加しません: {symbol}")
+                                    continue
+                                
+                                if in_morning:
+                                    pending_watchlist[symbol] = st
+                                    pending_release_at = max(pending_release_at, float(release_at_morning))
+                                    print(f"[MORNING_BATCH] TDnet検知 {symbol} → {MORNING_BATCH_END_HHMM}まで保留")
+                                else:
+                                    watchlist.setdefault(symbol, st)
 
             # --- EDINET 監視フェーズ ---
             if EDINET_API_KEY and now >= next_edinet_check_at and MANUAL_ONLY_MODE == 1:
@@ -5559,8 +5577,17 @@ def main():
 
                         # 証券コードが判明していれば watchlist に追加
                         if symbol and symbol not in watchlist:
-                            in_lunch, release_at = is_lunch_batch_window(datetime.datetime.now(JST))
-                            if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
+                            now_dt = datetime.datetime.now(JST)
+                            in_lunch, release_at = is_lunch_batch_window(now_dt)
+                            in_morning, release_at_morning = is_morning_batch_window(now_dt)
+                            in_afterhours_stop = is_afterhours_add_stop_window(now_dt)
+                            
+                            # 時間外停止期間中はwatchlistに追加しない（情報収集のみ）
+                            if in_afterhours_stop:
+                                print(f"[EDINET] 時間外停止期間中のためwatchlistに追加しません: {symbol}")
+                                continue
+                            
+                            if in_lunch or in_morning or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
                                 edinet_key = f"edinet_{doc_id}"
                                 st = {
                                     "tdnet_key": edinet_key,
@@ -5587,6 +5614,10 @@ def main():
                                     pending_watchlist[symbol] = st
                                     pending_release_at = max(pending_release_at, float(release_at))
                                     print(f"[LUNCH_BATCH] EDINET検知 {symbol} → {LUNCH_BATCH_END_HHMM}まで保留")
+                                elif in_morning:
+                                    pending_watchlist[symbol] = st
+                                    pending_release_at = max(pending_release_at, float(release_at_morning))
+                                    print(f"[MORNING_BATCH] EDINET検知 {symbol} → {MORNING_BATCH_END_HHMM}まで保留")
                                 else:
                                     watchlist[symbol] = st
                                     print(f"[EDINET] watchlistに追加: {symbol} (監視時間: {EDINET_WATCH_WINDOW_SECONDS}秒)")
@@ -5702,8 +5733,17 @@ def main():
 
                     # 銘柄コードが判明していればwatchlistに追加
                     if symbol and symbol not in watchlist:
-                        in_lunch, release_at = is_lunch_batch_window(datetime.datetime.now(JST))
-                        if in_lunch or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
+                        now_dt = datetime.datetime.now(JST)
+                        in_lunch, release_at = is_lunch_batch_window(now_dt)
+                        in_morning, release_at_morning = is_morning_batch_window(now_dt)
+                        in_afterhours_stop = is_afterhours_add_stop_window(now_dt)
+                        
+                        # 時間外停止期間中はwatchlistに追加しない（情報収集のみ）
+                        if in_afterhours_stop:
+                            print(f"[NEWS] 時間外停止期間中のためwatchlistに追加しません: {symbol}")
+                            continue
+                        
+                        if in_lunch or in_morning or (WATCH_MAX_SYMBOLS <= 0 or _count_auto_watchlist(watchlist) < WATCH_MAX_SYMBOLS):
                             news_key = f"news_{article_url}"
                             st = {
                                 "tdnet_key": news_key,
@@ -5732,6 +5772,10 @@ def main():
                                 pending_watchlist[symbol] = st
                                 pending_release_at = max(pending_release_at, float(release_at))
                                 print(f"[LUNCH_BATCH] NEWS検知 {symbol} → {LUNCH_BATCH_END_HHMM}まで保留")
+                            elif in_morning:
+                                pending_watchlist[symbol] = st
+                                pending_release_at = max(pending_release_at, float(release_at_morning))
+                                print(f"[MORNING_BATCH] NEWS検知 {symbol} → {MORNING_BATCH_END_HHMM}まで保留")
                             else:
                                 watchlist[symbol] = st
                                 print(f"[NEWS] watchlistに追加: {symbol} (監視時間: {NEWS_WATCH_WINDOW_SECONDS}秒)")
@@ -5807,6 +5851,9 @@ def main():
                                 watchlist[symbol] = state
                             else:
                                 watchlist.pop(symbol, None)
+                                # 履歴データをリセット
+                                reset_obi_history(symbol)
+                                reset_ma_vwap_history(symbol)
                             continue
 
                         # 個別銘柄のポーリングタイミングチェック
@@ -5857,6 +5904,14 @@ def main():
                             )
                             continue
 
+                        # 価格と出来高を抽出
+                        price, volume = extract_price_volume(board) if isinstance(board, dict) else (None, None)
+                        if price is None or volume is None:
+                            # 価格または出来高が取得できない場合はスキップ
+                            state["next_board_at"] = float(now) + float(get_watch_poll_seconds())
+                            watchlist[symbol] = state
+                            continue
+
                         # HFT OBIシグナル検知（板情報取得成功時）
                         try:
                             obi_sig = detect_obi_signal(symbol, board) if isinstance(board, dict) else None
@@ -5885,6 +5940,9 @@ def main():
                             watchlist[symbol] = state
                             if SPECIAL_QUOTE_REMOVE_STREAK > 0 and prev_sq >= SPECIAL_QUOTE_REMOVE_STREAK:
                                 watchlist.pop(symbol, None)
+                                # 履歴データをリセット
+                                reset_obi_history(symbol)
+                                reset_ma_vwap_history(symbol)
                                 try:
                                     event_queue.put_nowait({"kind": "event", "text": f"特別気配除外 {symbol} ({sq})", "symbol": symbol})
                                 except Exception:
@@ -6017,6 +6075,9 @@ def main():
                                 current_date,
                             )
                             watchlist.pop(symbol, None)
+                            # 履歴データをリセット
+                            reset_obi_history(symbol)
+                            reset_ma_vwap_history(symbol)
                             continue
 
                         # 保有中の銘柄かどうか判定（新規発注抑止用）
