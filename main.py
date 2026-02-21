@@ -323,16 +323,16 @@ NEWS_VOLUME_MULT_FACTOR = float(os.environ.get("NEWS_VOLUME_MULT_FACTOR", "1.5")
 # 略称辞書JSONファイルパス
 NEWS_ALIASES_PATH = os.environ.get("NEWS_ALIASES_PATH", os.path.join(_BASE_DIR, "aliases.json"))
 
-# 通常は4桁数字だが、新市場等の 285A のような形式も許容する。
+# 通常は4桁数字だが、新市場等の 285A のような形式も許容する.
 _MANUAL_SYMBOL_RE = re.compile(r"^(?:\d{4}|\d{3}[A-Za-z])$")
-# 手動監視銘柄（最大5銘柄）。カンマ区切りで証券コードを指定。GUIからも設定可能。
+# 手動監視銘柄（最大10銘柄）。カンマ区切りで証券コードを指定。GUIからも設定可能.
 MANUAL_WATCH_SYMBOLS_STR = os.environ.get("MANUAL_WATCH_SYMBOLS", "")
 MANUAL_WATCH_SYMBOLS: List[str] = [
     s.strip().upper()
     for s in MANUAL_WATCH_SYMBOLS_STR.split(",")
     if s.strip() and _MANUAL_SYMBOL_RE.match(s.strip())
-][:5]
-# 手動監視銘柄の監視ウィンドウ（秒）。非常に長い値を設定して常時監視とする。
+][:10]
+# 手動監視銘柄の監視ウィンドウ（秒）。非常に長い値を設定して常時監視とする.
 MANUAL_WATCH_WINDOW_SECONDS = float(os.environ.get("MANUAL_WATCH_WINDOW_SECONDS", "86400"))
 
 # 11:30〜12:30に検知した材料は12:30にまとめて監視開始する（昼休みバッチ）
@@ -352,6 +352,50 @@ AFTERHOURS_ADD_STOP_END_HHMM = (os.environ.get("AFTERHOURS_ADD_STOP_END_HHMM") o
 
 # 特別買/売気配が続く銘柄は監視対象から外す
 SPECIAL_QUOTE_REMOVE_STREAK = int(os.environ.get("SPECIAL_QUOTE_REMOVE_STREAK", "3"))
+
+# -----------------------------------------------------------------------------
+# HFT板情報インバランス検知設定
+# -----------------------------------------------------------------------------
+# HFT OBI (Order Book Imbalance) 検知を有効化
+HFT_OBI_ENABLE = (os.environ.get("HFT_OBI_ENABLE") or "0").strip() in {"1", "true", "True"}
+# OBI履歴保持ティック数
+HFT_OBI_HISTORY_SIZE = int(os.environ.get("HFT_OBI_HISTORY_SIZE", "50"))
+# OBI判定に必要な最小履歴数
+HFT_OBI_MIN_HISTORY = int(os.environ.get("HFT_OBI_MIN_HISTORY", "20"))
+# 買いエントリーシグナル閾値（標準偏差の倍数）
+HFT_OBI_ENTRY_SIGMA = float(os.environ.get("HFT_OBI_ENTRY_SIGMA", "2.5"))
+# 売りエントリーシグナル閾値（標準偏差の倍数）
+HFT_OBI_EXIT_SIGMA = float(os.environ.get("HFT_OBI_EXIT_SIGMA", "2.0"))
+# CVD（累積出来高差）の最小閾値（買いシグナル時）
+HFT_OBI_CVD_MIN_BUY = float(os.environ.get("HFT_OBI_CVD_MIN_BUY", "0"))
+# CVD（累積出来高差）の最大閾値（売りシグナル時）
+HFT_OBI_CVD_MAX_SELL = float(os.environ.get("HFT_OBI_CVD_MAX_SELL", "0"))
+
+# -----------------------------------------------------------------------------
+# 移動平均線（MA）フィルタ設定
+# -----------------------------------------------------------------------------
+# 移動平均線フィルタを有効化
+MA_FILTER_ENABLE = (os.environ.get("MA_FILTER_ENABLE") or "0").strip() in {"1", "true", "True"}
+# 移動平均線の種類（SMA=単純移動平均、EMA=指数移動平均）
+MA_TYPE = os.environ.get("MA_TYPE", "SMA").strip().upper()
+# 短期移動平均線の期間（ティック数）
+MA_SHORT_PERIOD = int(os.environ.get("MA_SHORT_PERIOD", "5"))
+# 長期移動平均線の期間（ティック数）
+MA_LONG_PERIOD = int(os.environ.get("MA_LONG_PERIOD", "20"))
+# ゴールデンクロス/デッドクロスでエントリー判定
+MA_CROSS_ENTRY = (os.environ.get("MA_CROSS_ENTRY") or "1").strip() in {"1", "true", "True"}
+# トレンドフィルタ（価格がMA上なら買いのみ、下なら売りのみ）
+MA_TREND_FILTER = (os.environ.get("MA_TREND_FILTER") or "1").strip() in {"1", "true", "True"}
+
+# -----------------------------------------------------------------------------
+# VWAP（出来高加重平均価格）フィルタ設定
+# -----------------------------------------------------------------------------
+# VWAPフィルタを有効化
+VWAP_FILTER_ENABLE = (os.environ.get("VWAP_FILTER_ENABLE") or "0").strip() in {"1", "true", "True"}
+# 価格がVWAP上で買い、下で売りのフィルタ
+VWAP_ENTRY_ABOVE = (os.environ.get("VWAP_ENTRY_ABOVE") or "1").strip() in {"1", "true", "True"}
+# VWAP乖離率(%)でフィルタ（0で無効）
+VWAP_DEVIATION_PCT = float(os.environ.get("VWAP_DEVIATION_PCT", "0.5"))
 
 # EDINETコードリストCSVのパス（EDINETコード→証券コード変換用）
 EDINET_CODE_LIST_PATH = os.environ.get("EDINET_CODE_LIST_PATH", os.path.join(_BASE_DIR, "EdinetcodeDlInfo.csv"))
@@ -452,10 +496,15 @@ def build_help_text() -> str:
     lines.append("  各設定項目の詳細は後述の「注文設定の詳細」を参照。")
     lines.append("  [注文設定を反映]ボタンで設定を適用し、.envファイルにも保存されます。")
     lines.append("")
-    lines.append("【手動監視銘柄エリア】（最大5銘柄）")
+    lines.append("【手動監視銘柄エリア】（最大10銘柄）")
     lines.append("  証券コード（4桁数字 or 3桁+英字）を入力し[反映]ボタンで適用。")
     lines.append("  手動監視銘柄は常時監視（最大24時間）され、早期終了の対象外です。")
     lines.append("  .envファイルにも保存されます。")
+    lines.append("")
+    lines.append("  ＜手動選択銘柄のみモード＞")
+    lines.append("  チェックボックスをONにすると、TDnet/EDINET/ニュースの自動監視を")
+    lines.append("  すべて停止し、手動で設定した銘柄のみを監視します。")
+    lines.append("  材料検知による自動発注も停止され、手動銘柄のみが対象になります。")
     lines.append("")
     lines.append("【実行ログエリア】")
     lines.append("  設定反映・手動監視銘柄変更などの操作結果を表示します。")
@@ -606,12 +655,23 @@ def build_help_text() -> str:
     lines.append("■ 手動監視銘柄")
     lines.append("─────────────────────────────")
     lines.append("")
-    lines.append("  最大5銘柄の証券コードを入力し[反映]で監視リストに追加できます。")
+    lines.append("  最大10銘柄の証券コードを入力し[反映]で監視リストに追加できます。")
     lines.append("  - 常時監視（最大24時間）で、早期終了の対象外です。")
     lines.append("  - TDnet/EDINET/ニュースとは独立して監視されます。")
-    lines.append("  - MANUAL_ONLY_MODE=1 の場合、材料由来の自動発注は停止され、")
-    lines.append("    手動監視銘柄のみが自動発注の対象になります。")
+    lines.append("  - 手動選択銘柄のみモードをONにすると、材料由来の自動監視を")
+    lines.append("    すべて停止し、手動銘柄のみを監視します。")
     lines.append("  - [ランキング]画面から値上がり率上位銘柄を選択して設定することも可能です。")
+    lines.append("")
+    lines.append("")
+    lines.append("■ HFT板情報インバランス検知")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  板情報の買い気配数量と売り気配数量の偏りを検知し、シグナルを出します。")
+    lines.append("  - HFT OBI検知を有効化: チェックでOBI検知機能を有効にします")
+    lines.append("  - エントリーσ: 買い/売りエントリーシグナルの閾値（標準偏差の倍数）")
+    lines.append("  - イグジットσ: ポジション決済シグナルの閾値（標準偏差の倍数）")
+    lines.append("  - 履歴数: OBI計算に使用する履歴ティック数（デフォルト: 50）")
+    lines.append("  - 最小履歴: シグナル判定に必要な最小履歴数（デフォルト: 20）")
     lines.append("")
     lines.append("")
     lines.append("■ ランキング機能")
@@ -2870,6 +2930,120 @@ def extract_price_volume(board: Dict[str, Any]) -> Tuple[Optional[float], Option
 
     return price, volume
 
+# -----------------------------------------------------------------------------
+# HFT板情報インバランス検知関数
+# -----------------------------------------------------------------------------
+
+# 各銘柄のOBI履歴とCVDを保持するグローバル辞書
+_hft_obi_history: Dict[str, List[float]] = {}
+_hft_cvd: Dict[str, float] = {}
+
+def compute_obi(buy_qty: float, sell_qty: float) -> float:
+    """オーダーブック・インバランス (OBI) を計算する関数。
+    
+    板情報の買い気配数量と売り気配数量から、どちらに偏っているかを示す指標を算出します。
+    
+    Args:
+        buy_qty (float): 買い気配数量（MarketOrderBuyQty等）
+        sell_qty (float): 売り気配数量（MarketOrderSellQty等）
+    
+    Returns:
+        float: OBI値 (-1.0 ~ +1.0)。+1に近いほど買い優勢、-1に近いほど売り優勢。
+    """
+    total = buy_qty + sell_qty
+    if total == 0:
+        return 0.0
+    return (buy_qty - sell_qty) / total
+
+def detect_obi_signal(symbol: str, board: Dict[str, Any]) -> Optional[str]:
+    """板情報からOBIシグナルを検知する関数。
+    
+    板の買い気配数量と売り気配数量を取得し、OBI（オーダーブック・インバランス）を計算。
+    統計的な閾値を超えた場合、買いまたは売りのシグナルを返します。
+    
+    Args:
+        symbol (str): 証券コード
+        board (Dict[str, Any]): 板情報レスポンス
+    
+    Returns:
+        Optional[str]: "buy" / "sell" / None
+    """
+    if not HFT_OBI_ENABLE:
+        return None
+    
+    # 板情報から買い気配数量と売り気配数量を取得
+    buy_qty = 0.0
+    sell_qty = 0.0
+    
+    # MarketOrderBuyQty / MarketOrderSellQty を優先的に使用
+    for k in ("MarketOrderBuyQty", "BuyQty", "BidQty"):
+        v = board.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            buy_qty = float(v)
+            break
+    
+    for k in ("MarketOrderSellQty", "SellQty", "AskQty"):
+        v = board.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            sell_qty = float(v)
+            break
+    
+    # 板情報が取得できない場合はスキップ
+    if buy_qty == 0 and sell_qty == 0:
+        return None
+    
+    # OBI計算
+    obi = compute_obi(buy_qty, sell_qty)
+    
+    # 銘柄ごとのOBI履歴を初期化
+    if symbol not in _hft_obi_history:
+        _hft_obi_history[symbol] = []
+    if symbol not in _hft_cvd:
+        _hft_cvd[symbol] = 0.0
+    
+    # OBI履歴に追加（最大サイズを超えたら古いものを削除）
+    _hft_obi_history[symbol].append(obi)
+    if len(_hft_obi_history[symbol]) > HFT_OBI_HISTORY_SIZE:
+        _hft_obi_history[symbol].pop(0)
+    
+    # CVD（累積出来高差）を更新
+    _hft_cvd[symbol] += (buy_qty - sell_qty)
+    
+    # 履歴が不十分な場合はシグナルなし
+    if len(_hft_obi_history[symbol]) < HFT_OBI_MIN_HISTORY:
+        return None
+    
+    # 統計的閾値の計算
+    try:
+        import statistics
+        hist = _hft_obi_history[symbol]
+        obi_mean = statistics.mean(hist)
+        obi_std = statistics.stdev(hist) if len(hist) > 1 else 0.0
+    except Exception:
+        return None
+    
+    if obi_std == 0:
+        return None
+    
+    # 買いエントリー判定
+    buy_entry_threshold = obi_mean + (HFT_OBI_ENTRY_SIGMA * obi_std)
+    if obi > buy_entry_threshold and _hft_cvd[symbol] > HFT_OBI_CVD_MIN_BUY:
+        return "buy"
+    
+    # 売りエントリー判定
+    sell_entry_threshold = obi_mean - (HFT_OBI_ENTRY_SIGMA * obi_std)
+    if obi < sell_entry_threshold and _hft_cvd[symbol] < HFT_OBI_CVD_MAX_SELL:
+        return "sell"
+    
+    return None
+
+def reset_obi_history(symbol: str) -> None:
+    """指定銘柄のOBI履歴とCVDをリセットする関数。"""
+    if symbol in _hft_obi_history:
+        _hft_obi_history[symbol].clear()
+    if symbol in _hft_cvd:
+        _hft_cvd[symbol] = 0.0
+
 def get_tdnet_disclosures():
     """
     TDnetの適時開示情報（今日の分）を取得して解析する関数。
@@ -3575,25 +3749,80 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Label(r7, textvariable=last_symbol_var, width=10, anchor="w").pack(side="left")
     tk.Label(r7, text="価格", width=6, anchor="e").pack(side="left")
     tk.Label(r7, textvariable=last_price_var, width=10, anchor="w").pack(side="left")
-    tk.Button(r7, text="手動発注", command=on_place_order).pack(side="right")
+    tk.Button(r7, text="手動発注", command=on_place_order, width=12).pack(side="left", padx=(10, 0))
 
-    # 注文設定の反映ボタン（1つに集約）
     r_apply = tk.Frame(frm)
     r_apply.pack(fill="x", padx=6, pady=(4, 8))
     tk.Button(r_apply, text="注文設定を反映", command=lambda: _on_push_settings_with_log(), width=20).pack(side="right")
 
-    # 手動監視銘柄エリア（最大5銘柄）
-    mw_frm = tk.LabelFrame(container, text="手動監視銘柄（最大5銘柄・常時出来高監視）")
+    # HFT板情報インバランス検知設定
+    hft_frm = tk.LabelFrame(container, text="HFT板情報インバランス検知設定")
+    hft_frm.pack(fill="x", padx=8, pady=8)
+    
+    hft_enable_row = tk.Frame(hft_frm)
+    hft_enable_row.pack(fill="x", padx=6, pady=4)
+    v_hft_obi_enable = tk.IntVar(value=1 if HFT_OBI_ENABLE else 0)
+    tk.Checkbutton(hft_enable_row, text="HFT OBI検知を有効化", variable=v_hft_obi_enable).pack(side="left")
+    
+    hft_params_row = tk.Frame(hft_frm)
+    hft_params_row.pack(fill="x", padx=6, pady=4)
+    
+    tk.Label(hft_params_row, text="エントリーσ:", width=10, anchor="w").pack(side="left")
+    v_hft_entry_sigma = tk.Entry(hft_params_row, width=6)
+    v_hft_entry_sigma.insert(0, str(HFT_OBI_ENTRY_SIGMA))
+    v_hft_entry_sigma.pack(side="left", padx=(0, 10))
+    
+    tk.Label(hft_params_row, text="イグジットσ:", width=10, anchor="w").pack(side="left")
+    v_hft_exit_sigma = tk.Entry(hft_params_row, width=6)
+    v_hft_exit_sigma.insert(0, str(HFT_OBI_EXIT_SIGMA))
+    v_hft_exit_sigma.pack(side="left", padx=(0, 10))
+    
+    tk.Label(hft_params_row, text="履歴数:", width=8, anchor="w").pack(side="left")
+    v_hft_history_size = tk.Entry(hft_params_row, width=6)
+    v_hft_history_size.insert(0, str(HFT_OBI_HISTORY_SIZE))
+    v_hft_history_size.pack(side="left", padx=(0, 10))
+    
+    tk.Label(hft_params_row, text="最小履歴:", width=8, anchor="w").pack(side="left")
+    v_hft_min_history = tk.Entry(hft_params_row, width=6)
+    v_hft_min_history.insert(0, str(HFT_OBI_MIN_HISTORY))
+    v_hft_min_history.pack(side="left")
+
+    # 手動監視銘柄エリア（最大10銘柄）
+    mw_frm = tk.LabelFrame(container, text="手動監視銘柄（最大10銘柄・常時出来高監視）")
     mw_frm.pack(fill="both", expand=True, padx=8, pady=8)
 
+    # 手動選択銘柄のみモード切り替え
+    manual_only_row = tk.Frame(mw_frm)
+    manual_only_row.pack(fill="x", padx=6, pady=(4, 2))
+    v_manual_only = tk.IntVar(value=MANUAL_ONLY_MODE)
+    manual_only_check = tk.Checkbutton(
+        manual_only_row,
+        text="手動選択銘柄のみモード（TDnet/EDINET/ニュース自動監視を停止）",
+        variable=v_manual_only,
+        fg="#d9534f",
+        font=("MS Gothic", 9, "bold")
+    )
+    manual_only_check.pack(side="left")
+
     mw_entries: List[tk.Entry] = []
-    mw_row = tk.Frame(mw_frm)
-    mw_row.pack(fill="x", padx=6, pady=4)
+    # 1行目: 1-5
+    mw_row1 = tk.Frame(mw_frm)
+    mw_row1.pack(fill="x", padx=6, pady=2)
     for i in range(5):
-        tk.Label(mw_row, text=f"{i+1}:", width=2).pack(side="left")
-        e = tk.Entry(mw_row, width=7)
+        tk.Label(mw_row1, text=f"{i+1}:", width=2).pack(side="left")
+        e = tk.Entry(mw_row1, width=7)
         e.pack(side="left", padx=(0, 6))
-        # 初期値を環境変数から設定
+        if i < len(MANUAL_WATCH_SYMBOLS):
+            e.insert(0, MANUAL_WATCH_SYMBOLS[i])
+        mw_entries.append(e)
+    
+    # 2行目: 6-10
+    mw_row2 = tk.Frame(mw_frm)
+    mw_row2.pack(fill="x", padx=6, pady=2)
+    for i in range(5, 10):
+        tk.Label(mw_row2, text=f"{i+1}:", width=2).pack(side="left")
+        e = tk.Entry(mw_row2, width=7)
+        e.pack(side="left", padx=(0, 6))
         if i < len(MANUAL_WATCH_SYMBOLS):
             e.insert(0, MANUAL_WATCH_SYMBOLS[i])
         mw_entries.append(e)
@@ -3607,11 +3836,13 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
                 sym = v.upper()
             slots.append({"slot": i, "symbol": sym})
         try:
-            command_queue.put_nowait({"kind": "manual_watch", "slots": slots})
+            command_queue.put_nowait({"kind": "manual_watch", "slots": slots, "manual_only_mode": v_manual_only.get()})
         except Exception:
             pass
 
-    tk.Button(mw_row, text="反映", command=lambda: _on_apply_manual_watch_with_log()).pack(side="left", padx=4)
+    mw_apply_row = tk.Frame(mw_frm)
+    mw_apply_row.pack(fill="x", padx=6, pady=4)
+    tk.Button(mw_apply_row, text="反映", command=lambda: _on_apply_manual_watch_with_log()).pack(side="left", padx=4)
 
     # --- 実行ログエリア（反映ボタン操作の結果表示用） ---
     exec_log_frm = tk.LabelFrame(container, text="実行ログ")
@@ -5358,32 +5589,6 @@ def main():
                                 except Exception:
                                     pass
                                 continue
-                        else:
-                            if int(state.get("special_quote_streak") or 0) != 0:
-                                state["special_quote_streak"] = 0
-                                watchlist[symbol] = state
-
-                        # 板情報から価格と出来高を抽出
-                        price, volume = extract_price_volume(board)
-                        if price is None or volume is None:
-                            # データ欠損時はログだけ残してスキップ
-                            append_watch_log(
-                                {
-                                    "datetime": datetime.datetime.now().isoformat(timespec="seconds"),
-                                    "tdnet_key": tdnet_key,
-                                    "symbol": symbol,
-                                    **watch_meta,
-                                    "status": "no_price_or_volume",
-                                    "triggered": state.get("triggered_surge") or state.get("triggered_crash"),
-                                },
-                                current_date,
-                            )
-                            continue
-
-                        # 初回取得時（ベースラインの設定）
-                        if state.get("baseline_price") is None:
-                            state["baseline_price"] = price
-                            state["baseline_volume"] = max(volume, 1.0)
                             state["last_volume"] = volume
                             state["last_vol_at"] = float(now)
                             state["vol_hist"] = [(float(now), float(volume))]

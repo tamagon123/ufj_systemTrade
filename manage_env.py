@@ -104,7 +104,7 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "key": "MANUAL_WATCH_SYMBOLS",
         "default": "",
         "type": "str",
-        "desc": "手動監視銘柄（最大5銘柄）。カンマ区切りで証券コードを指定します。例: 7203,6758",
+        "desc": "手動監視銘柄（最大10銘柄）。カンマ区切りで証券コードを指定します。例: 7203,6758,9984",
     },
     {
         "key": "MANUAL_WATCH_WINDOW_SECONDS",
@@ -171,6 +171,48 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "default": "3",
         "type": "int",
         "desc": "特別買/売気配が連続した銘柄を監視対象から外すまでの連続回数。0以下で無効。",
+    },
+    {
+        "key": "HFT_OBI_ENABLE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1でHFT板情報インバランス（OBI）検知を有効化。板の買い気配数量と売り気配数量の偏りを統計的に検知し、シグナルを出します。",
+    },
+    {
+        "key": "HFT_OBI_HISTORY_SIZE",
+        "default": "50",
+        "type": "int",
+        "desc": "OBI履歴保持ティック数。大きいほど長期的な傾向を捉えますが、反応が鈍くなります。",
+    },
+    {
+        "key": "HFT_OBI_MIN_HISTORY",
+        "default": "20",
+        "type": "int",
+        "desc": "OBI判定に必要な最小履歴数。この数に達するまではシグナルを出しません。",
+    },
+    {
+        "key": "HFT_OBI_ENTRY_SIGMA",
+        "default": "2.5",
+        "type": "float",
+        "desc": "買い/売りエントリーシグナル閾値（標準偏差の倍数）。大きいほど厳しい条件になります。",
+    },
+    {
+        "key": "HFT_OBI_EXIT_SIGMA",
+        "default": "2.0",
+        "type": "float",
+        "desc": "売り/買いイグジットシグナル閾値（標準偏差の倍数）。大きいほど厳しい条件になります。",
+    },
+    {
+        "key": "HFT_OBI_CVD_MIN_BUY",
+        "default": "0",
+        "type": "float",
+        "desc": "CVD（累積出来高差）の最小閾値（買いシグナル時）。買いシグナルを出すにはCVDがこの値以上である必要があります。",
+    },
+    {
+        "key": "HFT_OBI_CVD_MAX_SELL",
+        "default": "0",
+        "type": "float",
+        "desc": "CVD（累積出来高差）の最大閾値（売りシグナル時）。売りシグナルを出すにはCVDがこの値以下である必要があります。",
     },
     {
         "key": "WATCH_POLL_SECONDS_OFF_SESSION",
@@ -760,6 +802,8 @@ def _run_gui(env_path: str) -> int:
             return "朝バッチ"
         if k.startswith("AFTERHOURS_ADD_STOP_"):
             return "場引け後の自動追加停止"
+        if k.startswith("HFT_OBI_"):
+            return "HFT板情報インバランス検知"
         if k.startswith("WATCH_") or k in {"SPECIAL_QUOTE_REMOVE_STREAK"}:
             return "監視(Watchlist)"
         if k.startswith("ORDER_"):
