@@ -4015,6 +4015,10 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     v_hft_min_history = tk.Entry(hft_params_row, width=6)
     v_hft_min_history.insert(0, str(HFT_OBI_MIN_HISTORY))
     v_hft_min_history.pack(side="left")
+    
+    hft_apply = tk.Frame(hft_frm)
+    hft_apply.pack(fill="x", padx=6, pady=(4, 8))
+    tk.Button(hft_apply, text="HFT設定を反映", command=lambda: _on_push_hft_settings_with_log(), width=20).pack(side="right")
 
     # MA（移動平均線）フィルタ設定
     ma_frm = tk.LabelFrame(container, text="MA（移動平均線）フィルタ設定")
@@ -4051,6 +4055,10 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     tk.Checkbutton(ma_filter_row, text="クロスエントリー", variable=v_ma_cross).pack(side="left", padx=(0, 10))
     v_ma_trend = tk.IntVar(value=1 if MA_TREND_FILTER else 0)
     tk.Checkbutton(ma_filter_row, text="トレンドフィルタ", variable=v_ma_trend).pack(side="left")
+    
+    ma_apply = tk.Frame(ma_frm)
+    ma_apply.pack(fill="x", padx=6, pady=(4, 8))
+    tk.Button(ma_apply, text="MA設定を反映", command=lambda: _on_push_ma_settings_with_log(), width=20).pack(side="right")
 
     # VWAP（出来高加重平均価格）フィルタ設定
     vwap_frm = tk.LabelFrame(container, text="VWAP（出来高加重平均価格）フィルタ設定")
@@ -4071,6 +4079,10 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     v_vwap_deviation = tk.Entry(vwap_params_row, width=6)
     v_vwap_deviation.insert(0, str(VWAP_DEVIATION_PCT))
     v_vwap_deviation.pack(side="left")
+    
+    vwap_apply = tk.Frame(vwap_frm)
+    vwap_apply.pack(fill="x", padx=6, pady=(4, 8))
+    tk.Button(vwap_apply, text="VWAP設定を反映", command=lambda: _on_push_vwap_settings_with_log(), width=20).pack(side="right")
 
     # 手動監視銘柄エリア（最大10銘柄）
     mw_frm = tk.LabelFrame(container, text="手動監視銘柄（最大10銘柄・常時出来高監視）")
@@ -4127,7 +4139,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
 
     mw_apply_row = tk.Frame(mw_frm)
     mw_apply_row.pack(fill="x", padx=6, pady=4)
-    tk.Button(mw_apply_row, text="反映", command=lambda: _on_apply_manual_watch_with_log()).pack(side="left", padx=4)
+    tk.Button(mw_apply_row, text="反映", command=lambda: _on_apply_manual_watch_with_log()).pack(side="right", padx=4)
 
     # --- 実行ログエリア（反映ボタン操作の結果表示用） ---
     exec_log_frm = tk.LabelFrame(container, text="実行ログ")
@@ -4243,6 +4255,73 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         _append_exec_log(f"[{ts}] 手動監視銘柄を反映しました（.env同期済）: {desc}")
         _deselect_all_entries()
         messagebox.showinfo("反映完了", "手動監視銘柄の反映が完了しました。\n(.envファイルも更新されました)")
+
+    def _on_push_hft_settings_with_log():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        changes = []
+        changes.append(f"HFT_OBI={'ON' if v_hft_obi_enable.get() else 'OFF'}")
+        changes.append(f"エントリーσ={v_hft_entry_sigma.get()}")
+        changes.append(f"イグジットσ={v_hft_exit_sigma.get()}")
+        changes.append(f"履歴数={v_hft_history_size.get()}")
+        changes.append(f"最小履歴={v_hft_min_history.get()}")
+
+        # .envファイルに書き戻す
+        env_updates = {
+            "HFT_OBI_ENABLE": "1" if v_hft_obi_enable.get() else "0",
+            "HFT_OBI_ENTRY_SIGMA": v_hft_entry_sigma.get(),
+            "HFT_OBI_EXIT_SIGMA": v_hft_exit_sigma.get(),
+            "HFT_OBI_HISTORY_SIZE": v_hft_history_size.get(),
+            "HFT_OBI_MIN_HISTORY": v_hft_min_history.get(),
+        }
+        _save_to_dotenv(env_updates, os.path.join(_BASE_DIR, ".env"))
+
+        _append_exec_log(f"[{ts}] HFT設定を反映しました（.env同期済）: {', '.join(changes)}")
+        _deselect_all_entries()
+        messagebox.showinfo("反映完了", "HFT設定の反映が完了しました。\n(.envファイルも更新されました)")
+
+    def _on_push_ma_settings_with_log():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        changes = []
+        changes.append(f"MAフィルタ={'ON' if v_ma_enable.get() else 'OFF'}")
+        changes.append(f"MA種類={v_ma_type.get()}")
+        changes.append(f"短期期間={v_ma_short.get()}")
+        changes.append(f"長期期間={v_ma_long.get()}")
+        changes.append(f"クロスエントリー={'ON' if v_ma_cross.get() else 'OFF'}")
+        changes.append(f"トレンドフィルタ={'ON' if v_ma_trend.get() else 'OFF'}")
+
+        # .envファイルに書き戻す
+        env_updates = {
+            "MA_FILTER_ENABLE": "1" if v_ma_enable.get() else "0",
+            "MA_TYPE": v_ma_type.get(),
+            "MA_SHORT_PERIOD": v_ma_short.get(),
+            "MA_LONG_PERIOD": v_ma_long.get(),
+            "MA_CROSS_ENTRY": "1" if v_ma_cross.get() else "0",
+            "MA_TREND_FILTER": "1" if v_ma_trend.get() else "0",
+        }
+        _save_to_dotenv(env_updates, os.path.join(_BASE_DIR, ".env"))
+
+        _append_exec_log(f"[{ts}] MA設定を反映しました（.env同期済）: {', '.join(changes)}")
+        _deselect_all_entries()
+        messagebox.showinfo("反映完了", "MA設定の反映が完了しました。\n(.envファイルも更新されました)")
+
+    def _on_push_vwap_settings_with_log():
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        changes = []
+        changes.append(f"VWAPフィルタ={'ON' if v_vwap_enable.get() else 'OFF'}")
+        changes.append(f"VWAP位置フィルタ={'ON' if v_vwap_above.get() else 'OFF'}")
+        changes.append(f"乖離率%={v_vwap_deviation.get()}")
+
+        # .envファイルに書き戻す
+        env_updates = {
+            "VWAP_FILTER_ENABLE": "1" if v_vwap_enable.get() else "0",
+            "VWAP_ENTRY_ABOVE": "1" if v_vwap_above.get() else "0",
+            "VWAP_DEVIATION_PCT": v_vwap_deviation.get(),
+        }
+        _save_to_dotenv(env_updates, os.path.join(_BASE_DIR, ".env"))
+
+        _append_exec_log(f"[{ts}] VWAP設定を反映しました（.env同期済）: {', '.join(changes)}")
+        _deselect_all_entries()
+        messagebox.showinfo("反映完了", "VWAP設定の反映が完了しました。\n(.envファイルも更新されました)")
 
     # メインスレッドからのイベント通知を監視するループ
     def poll_queue():
