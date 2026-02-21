@@ -674,6 +674,29 @@ def build_help_text() -> str:
     lines.append("  - 最小履歴: シグナル判定に必要な最小履歴数（デフォルト: 20）")
     lines.append("")
     lines.append("")
+    lines.append("■ MA（移動平均線）フィルタ")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  移動平均線を使用してエントリー条件を制限します。")
+    lines.append("  - MAフィルタを有効化: チェックでMAフィルタ機能を有効にします")
+    lines.append("  - MA種類: SMA（単純移動平均）またはEMA（指数移動平均）を選択")
+    lines.append("  - 短期期間: 短期MAの期間（ティック数、デフォルト: 5）")
+    lines.append("  - 長期期間: 長期MAの期間（ティック数、デフォルト: 20）")
+    lines.append("  - クロスエントリー: ゴールデンクロス（短期MA>長期MA）で買い、")
+    lines.append("    デッドクロス（短期MA<長期MA）で売りのみ許可")
+    lines.append("  - トレンドフィルタ: 価格が長期MA上なら買いのみ、下なら売りのみ許可")
+    lines.append("")
+    lines.append("")
+    lines.append("■ VWAP（出来高加重平均価格）フィルタ")
+    lines.append("─────────────────────────────")
+    lines.append("")
+    lines.append("  VWAPを使用してエントリー条件を制限します。")
+    lines.append("  - VWAPフィルタを有効化: チェックでVWAPフィルタ機能を有効にします")
+    lines.append("  - VWAP位置フィルタ: 価格がVWAP上なら買いのみ、下なら売りのみ許可")
+    lines.append("  - 乖離率(%): VWAPからの乖離率がこの値を超える場合はエントリーを制限")
+    lines.append("    （例: 0.5 → VWAP±0.5%以内のみエントリー可、0で無効）")
+    lines.append("")
+    lines.append("")
     lines.append("■ ランキング機能")
     lines.append("─────────────────────────────")
     lines.append("")
@@ -3989,6 +4012,62 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     v_hft_min_history.insert(0, str(HFT_OBI_MIN_HISTORY))
     v_hft_min_history.pack(side="left")
 
+    # MA（移動平均線）フィルタ設定
+    ma_frm = tk.LabelFrame(container, text="MA（移動平均線）フィルタ設定")
+    ma_frm.pack(fill="x", padx=8, pady=8)
+    
+    ma_enable_row = tk.Frame(ma_frm)
+    ma_enable_row.pack(fill="x", padx=6, pady=4)
+    v_ma_enable = tk.IntVar(value=1 if MA_FILTER_ENABLE else 0)
+    tk.Checkbutton(ma_enable_row, text="MAフィルタを有効化", variable=v_ma_enable).pack(side="left")
+    
+    ma_type_row = tk.Frame(ma_frm)
+    ma_type_row.pack(fill="x", padx=6, pady=4)
+    tk.Label(ma_type_row, text="MA種類:", width=10, anchor="w").pack(side="left")
+    v_ma_type = tk.StringVar(value=MA_TYPE)
+    tk.Radiobutton(ma_type_row, text="SMA", variable=v_ma_type, value="SMA").pack(side="left", padx=(0, 10))
+    tk.Radiobutton(ma_type_row, text="EMA", variable=v_ma_type, value="EMA").pack(side="left")
+    
+    ma_params_row = tk.Frame(ma_frm)
+    ma_params_row.pack(fill="x", padx=6, pady=4)
+    
+    tk.Label(ma_params_row, text="短期期間:", width=10, anchor="w").pack(side="left")
+    v_ma_short = tk.Entry(ma_params_row, width=6)
+    v_ma_short.insert(0, str(MA_SHORT_PERIOD))
+    v_ma_short.pack(side="left", padx=(0, 10))
+    
+    tk.Label(ma_params_row, text="長期期間:", width=10, anchor="w").pack(side="left")
+    v_ma_long = tk.Entry(ma_params_row, width=6)
+    v_ma_long.insert(0, str(MA_LONG_PERIOD))
+    v_ma_long.pack(side="left")
+    
+    ma_filter_row = tk.Frame(ma_frm)
+    ma_filter_row.pack(fill="x", padx=6, pady=4)
+    v_ma_cross = tk.IntVar(value=1 if MA_CROSS_ENTRY else 0)
+    tk.Checkbutton(ma_filter_row, text="クロスエントリー", variable=v_ma_cross).pack(side="left", padx=(0, 10))
+    v_ma_trend = tk.IntVar(value=1 if MA_TREND_FILTER else 0)
+    tk.Checkbutton(ma_filter_row, text="トレンドフィルタ", variable=v_ma_trend).pack(side="left")
+
+    # VWAP（出来高加重平均価格）フィルタ設定
+    vwap_frm = tk.LabelFrame(container, text="VWAP（出来高加重平均価格）フィルタ設定")
+    vwap_frm.pack(fill="x", padx=8, pady=8)
+    
+    vwap_enable_row = tk.Frame(vwap_frm)
+    vwap_enable_row.pack(fill="x", padx=6, pady=4)
+    v_vwap_enable = tk.IntVar(value=1 if VWAP_FILTER_ENABLE else 0)
+    tk.Checkbutton(vwap_enable_row, text="VWAPフィルタを有効化", variable=v_vwap_enable).pack(side="left")
+    
+    vwap_params_row = tk.Frame(vwap_frm)
+    vwap_params_row.pack(fill="x", padx=6, pady=4)
+    
+    v_vwap_above = tk.IntVar(value=1 if VWAP_ENTRY_ABOVE else 0)
+    tk.Checkbutton(vwap_params_row, text="VWAP位置フィルタ", variable=v_vwap_above).pack(side="left", padx=(0, 10))
+    
+    tk.Label(vwap_params_row, text="乖離率(%):", width=10, anchor="w").pack(side="left")
+    v_vwap_deviation = tk.Entry(vwap_params_row, width=6)
+    v_vwap_deviation.insert(0, str(VWAP_DEVIATION_PCT))
+    v_vwap_deviation.pack(side="left")
+
     # 手動監視銘柄エリア（最大10銘柄）
     mw_frm = tk.LabelFrame(container, text="手動監視銘柄（最大10銘柄・常時出来高監視）")
     mw_frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -5827,6 +5906,17 @@ def main():
 
                         price = float(price)
                         volume = float(volume)
+                        
+                        # MA/VWAP用の価格・出来高履歴を更新
+                        max_ma_period = max(MA_SHORT_PERIOD, MA_LONG_PERIOD) if MA_FILTER_ENABLE else 0
+                        if MA_FILTER_ENABLE or VWAP_FILTER_ENABLE:
+                            update_price_history(symbol, price, volume, max_period=max(100, max_ma_period))
+                        
+                        # VWAPを計算（VWAP有効時のみ）
+                        if VWAP_FILTER_ENABLE:
+                            vwap = calculate_vwap(symbol, price, volume)
+                            if vwap is not None:
+                                state["vwap"] = vwap
 
                         # 価格変化率(%)
                         price_pct = ((price - base_price) / base_price) * 100.0 if base_price != 0 else 0.0
@@ -5998,13 +6088,22 @@ def main():
                                 price_range_pct = ((max_p - min_p) / base_price * 100.0) if base_price > 0 else 0.0
                                 price_range_ok = (min_price_range_pct <= 0 or price_range_pct >= min_price_range_pct)
                                 
+                                # MA/VWAPフィルタチェック
+                                ma_filter_ok = check_ma_filter(symbol, price, side)
+                                vwap_filter_ok = check_vwap_filter(symbol, price, side)
+                                
                                 # フィルタ除外時のログ出力
                                 if not baseline_vol_ok:
                                     print(f"[ORDER] skip {symbol}: baseline_volume {base_volume:.0f} < min {min_baseline_vol:.0f} (閑散銘柄)")
                                 if not price_range_ok:
                                     print(f"[ORDER] skip {symbol}: price_range {price_range_pct:.2f}% < min {min_price_range_pct:.2f}% (値動き不足)")
+                                if not ma_filter_ok:
+                                    print(f"[ORDER] skip {symbol}: MA filter NG (side={side})")
+                                if not vwap_filter_ok:
+                                    vwap_val = state.get("vwap", 0)
+                                    print(f"[ORDER] skip {symbol}: VWAP filter NG (price={price:.1f}, vwap={vwap_val:.1f}, side={side})")
                                 
-                                if baseline_vol_ok and price_range_ok:
+                                if baseline_vol_ok and price_range_ok and ma_filter_ok and vwap_filter_ok:
                                     streak = int(state.get("order_hit_streak") or 0) + 1
                                     state["order_hit_streak"] = streak
                                     watchlist[symbol] = state

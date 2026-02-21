@@ -215,6 +215,60 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "desc": "CVD（累積出来高差）の最大閾値（売りシグナル時）。売りシグナルを出すにはCVDがこの値以下である必要があります。",
     },
     {
+        "key": "MA_FILTER_ENABLE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1で移動平均線（MA）フィルタを有効化。価格がMA上/下、ゴールデンクロス/デッドクロスなどの条件でエントリーを制限します。",
+    },
+    {
+        "key": "MA_TYPE",
+        "default": "SMA",
+        "type": "str",
+        "desc": "移動平均線の種類。SMA（単純移動平均）またはEMA（指数移動平均）を選択します。",
+    },
+    {
+        "key": "MA_SHORT_PERIOD",
+        "default": "5",
+        "type": "int",
+        "desc": "短期移動平均線の期間（ティック数）。小さいほど直近の価格変動に敏感になります。",
+    },
+    {
+        "key": "MA_LONG_PERIOD",
+        "default": "20",
+        "type": "int",
+        "desc": "長期移動平均線の期間（ティック数）。大きいほど長期的なトレンドを捉えます。",
+    },
+    {
+        "key": "MA_CROSS_ENTRY",
+        "default": "1",
+        "type": "bool",
+        "desc": "1でゴールデンクロス/デッドクロスでのエントリー判定を有効化。短期MAが長期MAを上抜けで買い、下抜けで売り。",
+    },
+    {
+        "key": "MA_TREND_FILTER",
+        "default": "1",
+        "type": "bool",
+        "desc": "1でトレンドフィルタを有効化。価格が長期MA上なら買いのみ、下なら売りのみ許可します。",
+    },
+    {
+        "key": "VWAP_FILTER_ENABLE",
+        "default": "0",
+        "type": "bool",
+        "desc": "1でVWAP（出来高加重平均価格）フィルタを有効化。価格とVWAPの位置関係でエントリーを制限します。",
+    },
+    {
+        "key": "VWAP_ENTRY_ABOVE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1でVWAP位置フィルタを有効化。価格がVWAP上なら買いのみ、下なら売りのみ許可します。",
+    },
+    {
+        "key": "VWAP_DEVIATION_PCT",
+        "default": "0.5",
+        "type": "float",
+        "desc": "VWAP乖離率(%)のフィルタ。価格がVWAPからこの%以上乖離している場合はエントリーを制限します。0で無効。",
+    },
+    {
         "key": "WATCH_POLL_SECONDS_OFF_SESSION",
         "default": "10",
         "type": "float",
@@ -804,6 +858,10 @@ def _run_gui(env_path: str) -> int:
             return "場引け後の自動追加停止"
         if k.startswith("HFT_OBI_"):
             return "HFT板情報インバランス検知"
+        if k.startswith("MA_"):
+            return "移動平均線フィルタ"
+        if k.startswith("VWAP_"):
+            return "VWAPフィルタ"
         if k.startswith("WATCH_") or k in {"SPECIAL_QUOTE_REMOVE_STREAK"}:
             return "監視(Watchlist)"
         if k.startswith("ORDER_"):
