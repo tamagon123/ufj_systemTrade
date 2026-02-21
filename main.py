@@ -5857,6 +5857,26 @@ def main():
                             )
                             continue
 
+                        # HFT OBIシグナル検知（板情報取得成功時）
+                        try:
+                            obi_sig = detect_obi_signal(symbol, board) if isinstance(board, dict) else None
+                        except Exception:
+                            obi_sig = None
+                        if obi_sig in {"buy", "sell"}:
+                            prev_sig = str(state.get("obi_signal") or "")
+                            state["obi_signal"] = obi_sig
+                            if prev_sig != obi_sig:
+                                try:
+                                    event_queue.put_nowait({"kind": "event", "text": f"OBI {obi_sig} {symbol}", "symbol": symbol})
+                                except Exception:
+                                    pass
+                                print(f"[OBI] signal {obi_sig} {symbol}")
+                            watchlist[symbol] = state
+                        else:
+                            if state.get("obi_signal"):
+                                state.pop("obi_signal", None)
+                                watchlist[symbol] = state
+
                         # 特別買/売気配が続く銘柄は監視対象から外す
                         sq = detect_special_quote_side(board) if isinstance(board, dict) else ""
                         if sq:
@@ -6013,7 +6033,11 @@ def main():
                                 except Exception:
                                     pass
                             else:
-                                side = decide_side_by_trend(price_pct) # トレンド判定（外部関数想定）
+                                obi_sig = str(state.get("obi_signal") or "").strip().lower()
+                                if obi_sig in {"buy", "sell"}:
+                                    side = obi_sig
+                                else:
+                                    side = decide_side_by_trend(price_pct) # トレンド判定（外部関数想定）
                                 if side and should_place_side(str(order_settings.get("side_mode")), side): # 設定との照合
                                     manual_order_id = try_place_order(
                                         token=kabus_token,
@@ -6061,18 +6085,13 @@ def main():
                             and (not state.get("triggered_order"))
                             and (not _hp_has_position)
                             and _vol_mult_ok
-                            and (not _bv_ok)
-                        ):
-                            print(f"[ORDER] skip {symbol}: volume {volume:.0f} < base_volume_min {_bv_min:.0f}")
-                        
-                        if (
-                            str(order_settings.get("mode")).lower() == "auto"
-                            and (not state.get("triggered_order"))
-                            and (not _hp_has_position)
-                            and _vol_mult_ok
                             and _bv_ok
                         ):
-                            side = decide_side_by_trend(price_pct)
+                            obi_sig = str(state.get("obi_signal") or "").strip().lower()
+                            if obi_sig in {"buy", "sell"}:
+                                side = obi_sig
+                            else:
+                                side = decide_side_by_trend(price_pct)
                             # 価格変動率フィルタと売買フィルタの確認
                             if side and should_place_side(str(order_settings.get("side_mode")), side) and abs(float(price_pct)) >= float(ORDER_MIN_PRICE_PCT):
                                 # デイトレ向き銘柄フィルタ（案C + 案A）
@@ -6092,6 +6111,10 @@ def main():
                                 ma_filter_ok = check_ma_filter(symbol, price, side)
                                 vwap_filter_ok = check_vwap_filter(symbol, price, side)
                                 
+                                # OBIシグナルフィルタチェック（必須条件）
+                                obi_sig = str(state.get("obi_signal") or "").strip().lower()
+                                obi_filter_ok = (obi_sig in {"buy", "sell"})
+                                
                                 # フィルタ除外時のログ出力
                                 if not baseline_vol_ok:
                                     print(f"[ORDER] skip {symbol}: baseline_volume {base_volume:.0f} < min {min_baseline_vol:.0f} (閑散銘柄)")
@@ -6102,8 +6125,10 @@ def main():
                                 if not vwap_filter_ok:
                                     vwap_val = state.get("vwap", 0)
                                     print(f"[ORDER] skip {symbol}: VWAP filter NG (price={price:.1f}, vwap={vwap_val:.1f}, side={side})")
+                                if not obi_filter_ok:
+                                    print(f"[ORDER] skip {symbol}: OBI signal NG (no signal)")
                                 
-                                if baseline_vol_ok and price_range_ok and ma_filter_ok and vwap_filter_ok:
+                                if baseline_vol_ok and price_range_ok and ma_filter_ok and vwap_filter_ok and obi_filter_ok:
                                     streak = int(state.get("order_hit_streak") or 0) + 1
                                     state["order_hit_streak"] = streak
                                     watchlist[symbol] = state
