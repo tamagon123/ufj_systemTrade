@@ -5274,13 +5274,31 @@ def _fetch_todays_executions(token: Optional[str]) -> List[Dict[str, Any]]:
             else:
                 continue
             if entry_key in entry_prices and entry_prices[entry_key]:
-                entry_price, entry_qty = entry_prices[entry_key].pop(0)
-                # 売り返済: PnL = (返済価格 - 建値) × 数量
-                # 買い返済: PnL = (建値 - 返済価格) × 数量
-                if side_raw in (1, "1"):
-                    pnl_val = (price - entry_price) * qty
-                else:
-                    pnl_val = (entry_price - price) * qty
+                remaining_qty = qty
+                pnl_val = 0.0
+                
+                # 返済数量（remaining_qty）がゼロになるか、建玉がなくなるまでループ
+                while remaining_qty > 0 and entry_prices[entry_key]:
+                    entry_price, entry_qty = entry_prices[entry_key][0]
+                    
+                    if entry_qty > remaining_qty:
+                        # 建玉の一部だけを決済する場合（建玉データの数量を減らして残す）
+                        matched_qty = remaining_qty
+                        entry_prices[entry_key][0] = (entry_price, entry_qty - remaining_qty)
+                        remaining_qty = 0
+                    else:
+                        # 先頭の建玉をすべて決済する場合（リストから削除）
+                        matched_qty = entry_qty
+                        entry_prices[entry_key].pop(0)
+                        remaining_qty -= entry_qty
+
+                    # マッチした数量分だけ損益を加算
+                    if side_raw in (1, "1"): # 売り返済
+                        pnl_val += (price - entry_price) * matched_qty
+                    else: # 買い返済
+                        pnl_val += (entry_price - price) * matched_qty
+                
+                # 手数料を引いて最終的な損益とする
                 pnl_val -= ex.get("commission", 0.0)
                 ex["pnl"] = pnl_val
 
