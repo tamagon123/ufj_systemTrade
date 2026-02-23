@@ -1,12 +1,94 @@
 import os
 import sys
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 
 DEFAULT_ENV_PATH = ".env"
+PRESETS_PATH = "env_presets.json"
+
+
+# プリセット管理機能
+def load_presets() -> Dict[str, Dict[str, str]]:
+    """プリセットを読み込む"""
+    if not os.path.exists(PRESETS_PATH):
+        return {}
+    try:
+        with open(PRESETS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_presets(presets: Dict[str, Dict[str, str]]) -> bool:
+    """プリセットを保存"""
+    try:
+        with open(PRESETS_PATH, "w", encoding="utf-8") as f:
+            json.dump(presets, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+def apply_preset(preset_name: str, env: Dict[str, str]) -> Dict[str, str]:
+    """プリセットを現在の環境変数に適用"""
+    presets = load_presets()
+    if preset_name not in presets:
+        return env
+    
+    preset_values = presets[preset_name]
+    updated_env = env.copy()
+    updated_env.update(preset_values)
+    return updated_env
+
+def save_current_as_preset(preset_name: str, env: Dict[str, str]) -> bool:
+    """現在の環境変数をプリセットとして保存"""
+    presets = load_presets()
+    presets[preset_name] = env.copy()
+    return save_presets(presets)
+
+def delete_preset(preset_name: str) -> bool:
+    """プリセットを削除"""
+    presets = load_presets()
+    if preset_name in presets:
+        del presets[preset_name]
+        return save_presets(presets)
+    return False
+
+# デフォルトプリセット
+DEFAULT_PRESETS = {
+    "保守的設定": {
+        "ORDER_VOLUME_MULTIPLIER": "5",
+        "ORDER_CONSECUTIVE_HITS": "3",
+        "SURGE_PRICE_PCT": "3",
+        "SURGE_VOLUME_MULTIPLIER": "3",
+        "CRASH_PRICE_PCT": "3",
+        "CRASH_VOLUME_MULTIPLIER": "3",
+        "AUTO_EXIT_ENABLE": "1",
+        "PROFIT_TARGET_PCT": "2",
+        "LOSS_LIMIT_PCT": "1",
+    },
+    "積極的設定": {
+        "ORDER_VOLUME_MULTIPLIER": "2",
+        "ORDER_CONSECUTIVE_HITS": "1",
+        "SURGE_PRICE_PCT": "1.5",
+        "SURGE_VOLUME_MULTIPLIER": "1.5",
+        "CRASH_PRICE_PCT": "1.5",
+        "CRASH_VOLUME_MULTIPLIER": "1.5",
+        "AUTO_EXIT_ENABLE": "1",
+        "PROFIT_TARGET_PCT": "3",
+        "LOSS_LIMIT_PCT": "1.5",
+    },
+    "テスト用": {
+        "ORDER_DRY_RUN": "1",
+        "ORDER_VOLUME_MULTIPLIER": "2",
+        "ORDER_CONSECUTIVE_HITS": "2",
+        "MANUAL_ONLY_MODE": "1",
+        "EMAIL_ENABLE": "0",
+        "WEBSOCKET_ENABLE": "0",
+    }
+}
 
 
 ENV_SPECS: List[Dict[str, Any]] = [
@@ -646,6 +728,24 @@ ENV_SPECS: List[Dict[str, Any]] = [
         "type": "str",
         "desc": "通知メールの送信先アドレス。",
     },
+    {
+        "key": "WEBSOCKET_ENABLE",
+        "default": "1",
+        "type": "bool",
+        "desc": "1でWebSocket約定通知を有効化。リアルタイムで約定を検知し、状態遷移を自動化します。",
+    },
+    {
+        "key": "WEBSOCKET_RECONNECT_INTERVAL",
+        "default": "30",
+        "type": "int",
+        "desc": "WebSocket切断時の再接続間隔（秒）。短いほど早く再接続しますが負荷が増えます。",
+    },
+    {
+        "key": "WEBSOCKET_TIMEOUT_SECONDS",
+        "default": "60",
+        "type": "int",
+        "desc": "WebSocket接続のタイムアウト時間（秒）。長いほど不安定なネットワークに耐えます。",
+    },
 ]
 
 
@@ -749,6 +849,115 @@ def _run_gui(env_path: str) -> int:
     top.pack(fill="x", padx=10, pady=8)
 
     tk.Label(top, text=f".env: {os.path.abspath(env_path)}").pack(side="left")
+    
+    # プリセット管理UI
+    preset_frame = tk.Frame(top)
+    preset_frame.pack(side="right", padx=(20, 0))
+    
+    # プリセット初期化（デフォルトプリセットがなければ作成）
+    presets = load_presets()
+    if not presets:
+        save_presets(DEFAULT_PRESETS)
+        presets = DEFAULT_PRESETS.copy()
+    
+    # プリセット選択
+    tk.Label(preset_frame, text="プリセット:").pack(side="left", padx=(0, 5))
+    preset_var = tk.StringVar()
+    preset_combo = ttk.Combobox(preset_frame, textvariable=preset_var, width=15, state="readonly")
+    preset_combo['values'] = list(presets.keys())
+    preset_combo.pack(side="left", padx=(0, 5))
+    
+    def apply_selected_preset():
+        preset_name = preset_var.get()
+        if not preset_name:
+            messagebox.showwarning("警告", "プリセットを選択してください")
+            return
+        
+        if messagebox.askyesno("確認", f"プリセット「{preset_name}」を適用しますか？\n現在の設定は上書きされます。"):
+            # プリセットの値を各入力フィールドに反映
+            preset_values = presets[preset_name]
+            for key, value in preset_values.items():
+                if key in vars_bool:
+                    vars_bool[key].set(_parse_bool_str(value))
+                elif key in vars_str:
+                    vars_str[key].set(value)
+            messagebox.showinfo("完了", f"プリセット「{preset_name}」を適用しました")
+    
+    def save_current_preset():
+        preset_name = preset_var.get()
+        if not preset_name:
+            # 新しいプリセット名を入力
+            dialog = tk.Toplevel(root)
+            dialog.title("プリセット保存")
+            dialog.geometry("300x100")
+            dialog.transient(root)
+            dialog.grab_set()
+            
+            tk.Label(dialog, text="プリセット名:").pack(pady=(10, 5))
+            name_var = tk.StringVar()
+            name_entry = tk.Entry(dialog, textvariable=name_var, width=30)
+            name_entry.pack(pady=5)
+            name_entry.focus_set()
+            
+            def do_save():
+                name = name_var.get().strip()
+                if not name:
+                    messagebox.showwarning("警告", "プリセット名を入力してください")
+                    return
+                
+                # 現在の値を収集
+                current_values = {}
+                for key in vars_bool:
+                    current_values[key] = "1" if vars_bool[key].get() else "0"
+                for key in vars_str:
+                    current_values[key] = vars_str[key].get()
+                
+                if save_current_as_preset(name, current_values):
+                    presets[name] = current_values
+                    preset_combo['values'] = list(presets.keys())
+                    preset_var.set(name)
+                    messagebox.showinfo("完了", f"プリセット「{name}」を保存しました")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("エラー", "プリセットの保存に失敗しました")
+            
+            tk.Button(dialog, text="保存", command=do_save).pack(pady=10)
+            name_entry.bind("<Return>", lambda e: do_save())
+            return
+        
+        if messagebox.askyesno("確認", f"現在の設定をプリセット「{preset_name}」に上書き保存しますか？"):
+            # 現在の値を収集
+            current_values = {}
+            for key in vars_bool:
+                current_values[key] = "1" if vars_bool[key].get() else "0"
+            for key in vars_str:
+                current_values[key] = vars_str[key].get()
+            
+            if save_current_as_preset(preset_name, current_values):
+                presets[preset_name] = current_values
+                messagebox.showinfo("完了", f"プリセット「{preset_name}」を更新しました")
+            else:
+                messagebox.showerror("エラー", "プリセットの保存に失敗しました")
+    
+    def delete_current_preset():
+        preset_name = preset_var.get()
+        if not preset_name:
+            messagebox.showwarning("警告", "プリセットを選択してください")
+            return
+        
+        if messagebox.askyesno("確認", f"プリセット「{preset_name}」を削除しますか？"):
+            if delete_preset(preset_name):
+                del presets[preset_name]
+                preset_combo['values'] = list(presets.keys())
+                preset_var.set("")
+                messagebox.showinfo("完了", f"プリセット「{preset_name}」を削除しました")
+            else:
+                messagebox.showerror("エラー", "プリセットの削除に失敗しました")
+    
+    # プリセット操作ボタン
+    tk.Button(preset_frame, text="適用", command=apply_selected_preset, width=8).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="保存", command=save_current_preset, width=8).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="削除", command=delete_current_preset, width=8).pack(side="left", padx=2)
 
     main = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
     main.pack(fill="both", expand=True, padx=10, pady=10)
@@ -872,6 +1081,8 @@ def _run_gui(env_path: str) -> int:
             return "自動決済"
         if k.startswith("EMAIL_"):
             return "メール通知"
+        if k.startswith("WEBSOCKET_"):
+            return "WebSocket約定通知"
         return "その他"
 
     def show_desc(key: str) -> None:

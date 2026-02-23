@@ -20,6 +20,10 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, Tuple, Dict, Any, List
+from collections import deque
+import asyncio
+import websockets
+import websocket
 
 def _load_dotenv(path: str = ".env") -> None:
     try:
@@ -88,6 +92,50 @@ def _save_to_dotenv(updates: Dict[str, str], path: str = ".env") -> None:
 _BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 
 _load_dotenv(os.path.join(_BASE_DIR, ".env"))
+
+# -----------------------------------------------------------------------------
+# SystemStateクラスの定義
+# -----------------------------------------------------------------------------
+
+class SystemState:
+    """取引状態を管理するクラス"""
+    
+    def __init__(self):
+        # 状態: MONITORING -> ORDERING -> TRADING
+        self.mode = "MONITORING"
+        self.active_symbol = None
+        self.entry_price = 0.0
+        self.entry_time = 0.0
+        
+        # 発注中の注文IDと発注時刻を保持
+        self.pending_order_id = None
+        self.order_sent_time = 0.0
+        
+        # ボリンジャーバンド高速計算用 ($O(1)$ 演算用)
+        self.price_history = {}
+        self.sum_x = {}
+        self.sum_x2 = {}
+        
+        # リスク管理用変数
+        self.hard_stop_price = 0.0
+        self.highest_price = 0.0
+    
+    def initialize_symbol(self, symbol: str):
+        """銘柄をボリンジャーバンド計算用に初期化する"""
+        if symbol not in self.price_history:
+            self.price_history[symbol] = deque(maxlen=20)
+            self.sum_x[symbol] = 0.0
+            self.sum_x2[symbol] = 0.0
+
+# グローバルなシステム状態インスタンス
+system_state = SystemState()
+
+# -----------------------------------------------------------------------------
+# WebSocket接続管理グローバル変数
+# -----------------------------------------------------------------------------
+websocket_connection = None
+websocket_thread = None
+websocket_running = False
 
 # -----------------------------------------------------------------------------
 # 定数・設定値の定義
@@ -1128,6 +1176,78 @@ def normalize_tdnet_code_to_symbol(code: str) -> str:
     if len(c) == 5 and c.endswith("0"):
         return c[:-1]
     return c
+
+def on_websocket_message(ws, message):
+    """WebSocketメッセージ受信時のコールバック"""
+    try:
+        # メッセージをJSONとして解析
+        data = json.loads(message)
+        print(f"WebSocketメッセージ受信: {data}")
+        # 必要に応じてメッセージ処理ロジックを追加
+    except json.JSONDecodeError:
+        print(f"WebSocketメッセージ受信 (JSON以外): {message}")
+    except Exception as e:
+        print(f"WebSocketメッセージ処理エラー: {e}")
+
+def on_websocket_error(ws, error):
+    """WebSocketエラー時のコールバック"""
+    print(f"WebSocketエラー: {error}")
+
+def on_websocket_close(ws, close_status_code, close_msg):
+    """WebSocket接続終了時のコールバック"""
+    global websocket_running, websocket_connection
+    print(f"WebSocket接続終了: ステータス={close_status_code}, メッセージ={close_msg}")
+    websocket_running = False
+    websocket_connection = None
+
+def on_websocket_open(ws):
+    """WebSocket接続開始時のコールバック"""
+    print("WebSocket接続開始")
+    # 接続開始時の初期化処理を追加
+
+def start_websocket_connection(url):
+    """WebSocket接続を開始する関数"""
+    global websocket_running, websocket_connection
+    try:
+        import websocket
+        ws = websocket.WebSocketApp(
+            url,
+            on_message=on_websocket_message,
+            on_error=on_websocket_error,
+            on_close=on_websocket_close,
+            on_open=on_websocket_open
+        )
+        
+        # 別スレッドでWebSocket接続を開始
+        import threading
+        ws_thread = threading.Thread(target=ws.run_forever)
+        ws_thread.daemon = True
+        ws_thread.start()
+        
+        # グローバル変数を更新
+        websocket_connection = ws
+        websocket_running = True
+        
+        print(f"WebSocket接続を開始しました: {url}")
+        return ws
+    except ImportError:
+        print("WebSocketライブラリがインストールされていません。pip install websocket-client を実行してください。")
+        return None
+    except Exception as e:
+        print(f"WebSocket接続開始エラー: {e}")
+        return None
+
+def stop_websocket_connection(ws):
+    """WebSocket接続を停止する関数"""
+    global websocket_running, websocket_connection
+    try:
+        if ws:
+            ws.close()
+        websocket_running = False
+        websocket_connection = None
+        print("WebSocket接続を停止しました")
+    except Exception as e:
+        print(f"WebSocket接続停止エラー: {e}")
 
 # -----------------------------------------------------------------------------
 # EDINET 関連関数
@@ -2957,6 +3077,34 @@ def extract_price_volume(board: Dict[str, Any]) -> Tuple[Optional[float], Option
 
     return price, volume
 
+def extract_ask_bid_prices(board: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    """板情報レスポンスから、最良売気配(ask)と最良買気配(bid)を安全に取り出す関数。
+
+    Args:
+        board (Dict[str, Any]): APIからの板情報レスポンス。
+
+    Returns:
+        tuple: (ask_price, bid_price)。取得できない場合はNone。
+    """
+    ask_price = None
+    bid_price = None
+
+    # 最良売気配（Ask）の取得
+    for k in ("AskPrice", "SellPrice", "BestAskPrice"):
+        v = board.get(k)
+        if isinstance(v, (int, float)):
+            ask_price = float(v)
+            break
+
+    # 最良買気配（Bid）の取得  
+    for k in ("BidPrice", "BuyPrice", "BestBidPrice"):
+        v = board.get(k)
+        if isinstance(v, (int, float)):
+            bid_price = float(v)
+            break
+
+    return ask_price, bid_price
+
 # -----------------------------------------------------------------------------
 # HFT板情報インバランス検知関数
 # -----------------------------------------------------------------------------
@@ -3356,7 +3504,6 @@ def get_tdnet_disclosures():
                 break
 
         return results, 200, 0
-
     except Exception as e:
         print(f"Error occurred: {e}")
         return [], None, 0
@@ -3371,7 +3518,7 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
         command_queue (queue.Queue): GUIからメインスレッドへの操作指示用キュー。
     """
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import messagebox, ttk
 
     root = tk.Tk()
     root.title("TDnet監視 / 自動売買")
@@ -3825,6 +3972,171 @@ def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     # 注文設定エリア
     frm = tk.LabelFrame(container, text="注文設定")
     frm.pack(fill="both", expand=True, padx=8, pady=8)
+
+    # プリセット管理UI（注文設定エリアの上部に追加）
+    preset_frame = tk.Frame(frm)
+    preset_frame.pack(fill="x", padx=6, pady=(6, 10))
+    
+    # プリセット機能のインポート
+    try:
+        from manage_env import load_presets, save_presets, DEFAULT_PRESETS
+        presets = load_presets()
+        if not presets:
+            save_presets(DEFAULT_PRESETS)
+            presets = DEFAULT_PRESETS.copy()
+    except Exception:
+        presets = {}
+    
+    # プリセット選択
+    tk.Label(preset_frame, text="プリセット:", width=8, anchor="w").pack(side="left")
+    preset_var = tk.StringVar()
+    preset_combo = ttk.Combobox(preset_frame, textvariable=preset_var, width=15, state="readonly")
+    preset_combo['values'] = list(presets.keys())
+    preset_combo.pack(side="left", padx=(0, 5))
+    
+    def apply_order_preset():
+        """注文設定プリセットを適用"""
+        preset_name = preset_var.get()
+        if not preset_name or preset_name not in presets:
+            messagebox.showwarning("警告", "プリセットを選択してください")
+            return
+        
+        preset_values = presets[preset_name]
+        
+        # プリセットの値を各入力フィールドに反映
+        if "ORDER_MODE" in preset_values:
+            v_mode.set(preset_values["ORDER_MODE"])
+        if "ORDER_SIDE_MODE" in preset_values:
+            v_side_mode.set(preset_values["ORDER_SIDE_MODE"])
+        if "ORDER_CASH_MARGIN" in preset_values:
+            v_cash_margin.set(preset_values["ORDER_CASH_MARGIN"])
+        if "ORDER_TYPE" in preset_values:
+            v_order_type.set(preset_values["ORDER_TYPE"])
+        if "ORDER_LIMIT_PCT" in preset_values:
+            v_limit_pct.set(preset_values["ORDER_LIMIT_PCT"])
+        if "ORDER_QTY" in preset_values:
+            v_qty.set(preset_values["ORDER_QTY"])
+        if "ORDER_DRY_RUN" in preset_values:
+            v_dry.set(1 if preset_values["ORDER_DRY_RUN"] in {"1", "true", "True"} else 0)
+        if "ORDER_CONFIRM" in preset_values:
+            v_confirm.set(1 if preset_values["ORDER_CONFIRM"] in {"1", "true", "True"} else 0)
+        if "ORDER_VOLUME_MULTIPLIER" in preset_values:
+            v_vol_mult.set(preset_values["ORDER_VOLUME_MULTIPLIER"])
+        if "ORDER_PRICE_MIN" in preset_values:
+            v_price_min.set(preset_values["ORDER_PRICE_MIN"])
+        if "ORDER_PRICE_MAX" in preset_values:
+            v_price_max.set(preset_values["ORDER_PRICE_MAX"])
+        if "ORDER_BASE_VOLUME_MIN" in preset_values:
+            v_base_vol_min.set(preset_values["ORDER_BASE_VOLUME_MIN"])
+        if "AUTO_EXIT_ENABLE" in preset_values:
+            v_auto_exit.set(1 if preset_values["AUTO_EXIT_ENABLE"] in {"1", "true", "True"} else 0)
+        if "AUTO_EXIT_PROFIT_YEN_PER_100" in preset_values:
+            v_profit_yen.set(preset_values["AUTO_EXIT_PROFIT_YEN_PER_100"])
+        if "AUTO_EXIT_STOPLOSS_YEN_PER_100" in preset_values:
+            v_stoploss_yen.set(preset_values["AUTO_EXIT_STOPLOSS_YEN_PER_100"])
+        if "AUTO_EXIT_STAGNATION_SECONDS" in preset_values:
+            v_stag_secs.set(preset_values["AUTO_EXIT_STAGNATION_SECONDS"])
+        if "AUTO_EXIT_STAGNATION_PRICE_PCT" in preset_values:
+            v_stag_price_pct.set(preset_values["AUTO_EXIT_STAGNATION_PRICE_PCT"])
+        if "AUTO_EXIT_STAGNATION_VOLUME_MULT" in preset_values:
+            v_stag_vol_mult.set(preset_values["AUTO_EXIT_STAGNATION_VOLUME_MULT"])
+        if "AUTO_EXIT_STAGNATION_HITS" in preset_values:
+            v_stag_hits.set(preset_values["AUTO_EXIT_STAGNATION_HITS"])
+        
+        messagebox.showinfo("完了", f"プリセット「{preset_name}」を適用しました")
+    
+    def save_order_preset():
+        """現在の注文設定をプリセットとして保存"""
+        preset_name = preset_var.get()
+        if not preset_name:
+            # 新しいプリセット名を入力
+            dialog = tk.Toplevel(root)
+            dialog.title("プリセット保存")
+            dialog.geometry("300x100")
+            dialog.transient(root)
+            dialog.grab_set()
+            
+            tk.Label(dialog, text="プリセット名:").pack(pady=(10, 5))
+            name_var = tk.StringVar()
+            name_entry = tk.Entry(dialog, textvariable=name_var, width=30)
+            name_entry.pack(pady=5)
+            name_entry.focus_set()
+            
+            def do_save():
+                name = name_var.get().strip()
+                if not name:
+                    messagebox.showwarning("警告", "プリセット名を入力してください")
+                    return
+                
+                # 現在の注文設定値を収集
+                current_values = {
+                    "ORDER_MODE": v_mode.get(),
+                    "ORDER_SIDE_MODE": v_side_mode.get(),
+                    "ORDER_CASH_MARGIN": v_cash_margin.get(),
+                    "ORDER_TYPE": v_order_type.get(),
+                    "ORDER_LIMIT_PCT": v_limit_pct.get(),
+                    "ORDER_QTY": v_qty.get(),
+                    "ORDER_DRY_RUN": "1" if v_dry.get() else "0",
+                    "ORDER_CONFIRM": "1" if v_confirm.get() else "0",
+                    "ORDER_VOLUME_MULTIPLIER": v_vol_mult.get(),
+                    "ORDER_PRICE_MIN": v_price_min.get(),
+                    "ORDER_PRICE_MAX": v_price_max.get(),
+                    "ORDER_BASE_VOLUME_MIN": v_base_vol_min.get(),
+                    "AUTO_EXIT_ENABLE": "1" if v_auto_exit.get() else "0",
+                    "AUTO_EXIT_PROFIT_YEN_PER_100": v_profit_yen.get(),
+                    "AUTO_EXIT_STOPLOSS_YEN_PER_100": v_stoploss_yen.get(),
+                    "AUTO_EXIT_STAGNATION_SECONDS": v_stag_secs.get(),
+                    "AUTO_EXIT_STAGNATION_PRICE_PCT": v_stag_price_pct.get(),
+                    "AUTO_EXIT_STAGNATION_VOLUME_MULT": v_stag_vol_mult.get(),
+                    "AUTO_EXIT_STAGNATION_HITS": v_stag_hits.get(),
+                }
+                
+                if save_presets({**presets, name: current_values}):
+                    presets[name] = current_values
+                    preset_combo['values'] = list(presets.keys())
+                    preset_var.set(name)
+                    messagebox.showinfo("完了", f"プリセット「{name}」を保存しました")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("エラー", "プリセットの保存に失敗しました")
+            
+            tk.Button(dialog, text="保存", command=do_save).pack(pady=10)
+            name_entry.bind("<Return>", lambda e: do_save())
+            return
+        
+        if messagebox.askyesno("確認", f"現在の注文設定をプリセット「{preset_name}」に上書き保存しますか？"):
+            # 現在の注文設定値を収集
+            current_values = {
+                "ORDER_MODE": v_mode.get(),
+                "ORDER_SIDE_MODE": v_side_mode.get(),
+                "ORDER_CASH_MARGIN": v_cash_margin.get(),
+                "ORDER_TYPE": v_order_type.get(),
+                "ORDER_LIMIT_PCT": v_limit_pct.get(),
+                "ORDER_QTY": v_qty.get(),
+                "ORDER_DRY_RUN": "1" if v_dry.get() else "0",
+                "ORDER_CONFIRM": "1" if v_confirm.get() else "0",
+                "ORDER_VOLUME_MULTIPLIER": v_vol_mult.get(),
+                "ORDER_PRICE_MIN": v_price_min.get(),
+                "ORDER_PRICE_MAX": v_price_max.get(),
+                "ORDER_BASE_VOLUME_MIN": v_base_vol_min.get(),
+                "AUTO_EXIT_ENABLE": "1" if v_auto_exit.get() else "0",
+                "AUTO_EXIT_PROFIT_YEN_PER_100": v_profit_yen.get(),
+                "AUTO_EXIT_STOPLOSS_YEN_PER_100": v_stoploss_yen.get(),
+                "AUTO_EXIT_STAGNATION_SECONDS": v_stag_secs.get(),
+                "AUTO_EXIT_STAGNATION_PRICE_PCT": v_stag_price_pct.get(),
+                "AUTO_EXIT_STAGNATION_VOLUME_MULT": v_stag_vol_mult.get(),
+                "AUTO_EXIT_STAGNATION_HITS": v_stag_hits.get(),
+            }
+            
+            if save_presets({**presets, preset_name: current_values}):
+                presets[preset_name] = current_values
+                messagebox.showinfo("完了", f"プリセット「{preset_name}」を更新しました")
+            else:
+                messagebox.showerror("エラー", "プリセットの保存に失敗しました")
+    
+    # プリセット操作ボタン
+    tk.Button(preset_frame, text="適用", command=apply_order_preset, width=8).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="保存", command=save_order_preset, width=8).pack(side="left", padx=2)
 
     # 設定値保持用のTk変数
     v_mode = tk.StringVar(value=ORDER_MODE)
@@ -5885,6 +6197,15 @@ def main():
                 except Exception:
                     pass
 
+                # WebSocket接続の開始（トークン取得後、初回のみ）
+                if kabus_token and not websocket_running:
+                    try:
+                        websocket_url = "ws://localhost:18080/kabusapi/websocket"
+                        start_websocket_connection(websocket_url)
+                        print("[WS] WebSocket約定通知を開始しました")
+                    except Exception as e:
+                        print(f"[WS_ERROR] WebSocket接続開始エラー: {e}")
+
                 # 初回のみ全登録解除（不要なPush配信を止めるため）
                 if kabus_token and (not kabus_unregistered_on_start):
                     try:
@@ -5990,6 +6311,39 @@ def main():
                             state["next_board_at"] = float(now) + float(get_watch_poll_seconds())
                             watchlist[symbol] = state
                             continue
+
+                        # Ask/Bid価格を抽出
+                        ask_price, bid_price = extract_ask_bid_prices(board) if isinstance(board, dict) else (None, None)
+                        # Ask/Bidが取得できない場合は現在値で代用
+                        if ask_price is None:
+                            ask_price = price
+                        if bid_price is None:
+                            bid_price = price
+
+                        # 新しいHFTシグナル処理を統合
+                        try:
+                            # シグナル判定のためのダミー値（実際の実装では適切な指標を使用）
+                            is_trend_up = price_pct > 0 if 'price_pct' in locals() else True
+                            is_oversold = False  # RSI等の指標から判定
+                            has_price_action = True  # 価格アクションの判定
+                            is_obi_breakout = obi_sig in {"buy", "sell"} if 'obi_sig' in locals() else False
+                            pattern_signal = f"OBI_{obi_sig}" if is_obi_breakout else "PRICE_ACTION"
+                            
+                            # 新しいprocess_signal関数を呼び出し
+                            process_signal(
+                                symbol=symbol,
+                                current_price=float(price),
+                                ask_price=float(ask_price),
+                                bid_price=float(bid_price),
+                                is_trend_up=is_trend_up,
+                                is_oversold=is_oversold,
+                                has_price_action=has_price_action,
+                                is_obi_breakout=is_obi_breakout,
+                                pattern_signal=pattern_signal
+                            )
+                        except Exception as e:
+                            print(f"[PROCESS_SIGNAL] エラー: {e} for {symbol}")
+                            # エラーが発生しても既存の処理は続行
 
                         # HFT OBIシグナル検知（板情報取得成功時）
                         try:
@@ -6741,6 +7095,20 @@ def main():
 
     except KeyboardInterrupt:
         print("監視を終了します")
+        # WebSocket接続のクリーンアップ
+        try:
+            stop_websocket_connection()
+            print("[WS] WebSocket接続をクリーンアップしました")
+        except Exception as e:
+            print(f"[WS_ERROR] WebSocketクリーンアップエラー: {e}")
+    except Exception as e:
+        print(f"[FATAL] 予期せぬエラー: {e}")
+        # WebSocket接続のクリーンアップ
+        try:
+            stop_websocket_connection()
+            print("[WS] WebSocket接続をクリーンアップしました")
+        except Exception:
+            pass
 
 
 def print_current_env_config(phase_now: str) -> None:
