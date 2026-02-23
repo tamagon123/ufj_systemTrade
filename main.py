@@ -394,7 +394,7 @@ MORNING_BATCH_END_HHMM = (os.environ.get("MORNING_BATCH_END_HHMM") or "09:00").s
 # 15:30〜24:00は自動でwatchlistへ追加しない（情報収集のみ）
 AFTERHOURS_ADD_STOP_ENABLE = (os.environ.get("AFTERHOURS_ADD_STOP_ENABLE") or "1").strip() not in {"0", "false", "False"}
 AFTERHOURS_ADD_STOP_START_HHMM = (os.environ.get("AFTERHOURS_ADD_STOP_START_HHMM") or "15:30").strip()
-AFTERHOURS_ADD_STOP_END_HHMM = (os.environ.get("AFTERHOURS_ADD_STOP_END_HHMM") or "24:00").strip()
+AFTERHOURS_ADD_STOP_END_HHMM = (os.environ.get("AFTERHOURS_ADD_STOP_END_HHMM") or "23:59").strip()
 
 # 特別買/売気配が続く銘柄は監視対象から外す
 SPECIAL_QUOTE_REMOVE_STREAK = int(os.environ.get("SPECIAL_QUOTE_REMOVE_STREAK", "3"))
@@ -5539,6 +5539,7 @@ def main():
     
     スレッドの起動、監視ループ、APIポーリング、発注ロジックの管理を行います。
     """
+    global threading
     print("=== TDnet 好材料監視モニターを開始します ===")
     print(f"ターゲットキーワード: {POSITIVE_KEYWORDS}")
 
