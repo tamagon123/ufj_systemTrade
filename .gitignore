@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .env
 logs/
+app/
+build/
+dist/
+*.spec
+env_presets.json

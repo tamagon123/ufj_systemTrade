@@ -3508,6 +3508,41 @@ def get_tdnet_disclosures():
         print(f"Error occurred: {e}")
         return [], None, 0
 
+def process_signal(symbol: str, current_price: float, ask_price: float, bid_price: float,
+                   is_trend_up: bool, is_oversold: bool, has_price_action: bool,
+                   is_obi_breakout: bool, pattern_signal: str) -> None:
+    """シグナル処理を統合する関数
+    
+    Args:
+        symbol: 銘柄コード
+        current_price: 現在価格
+        ask_price: 買気配価格
+        bid_price: 売気配価格
+        is_trend_up: トレンドが上向きか
+        is_oversold: 売られすぎか
+        has_price_action: 価格アクションがあるか
+        is_obi_breakout: OBIブレイクアウトか
+        pattern_signal: パターンシグナル名
+    """
+    # 現在はシグナル情報をログ出力するのみ
+    # 将来的にはここでシグナルのフィルタリングや統合処理を実装
+    signal_info = {
+        "symbol": symbol,
+        "price": current_price,
+        "ask": ask_price,
+        "bid": bid_price,
+        "trend_up": is_trend_up,
+        "oversold": is_oversold,
+        "price_action": has_price_action,
+        "obi_breakout": is_obi_breakout,
+        "pattern": pattern_signal
+    }
+    
+    # デバッグ用にシグナル情報を出力
+    if is_obi_breakout or has_price_action:
+        print(f"[SIGNAL] {symbol}: {pattern_signal} | Price:{current_price} Ask:{ask_price} Bid:{bid_price}")
+
+
 def start_gui(event_queue: "queue.Queue", command_queue: "queue.Queue"):
     """Tkinterを使用したGUIを起動する関数。
     
