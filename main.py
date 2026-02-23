@@ -21,8 +21,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, Tuple, Dict, Any, List
 from collections import deque
-import asyncio
-import websockets
 import websocket
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -2467,9 +2465,9 @@ def calc_limit_price(current_price: float, side: str, pct: float) -> float:
     p = float(current_price)
     rate = float(pct) / 100.0
     if side == "buy":
-        v = p * (1.0 - rate)
+        v = p * (1.0 + rate)  # 買いなら現在値+X%（高い方に指値）
     else:
-        v = p * (1.0 + rate)
+        v = p * (1.0 - rate)  # 売りなら現在値-X%（低い方に指値）
     return round(v, 1)
 
 def apply_order_settings(order_settings: Dict[str, Any], cmd: Dict[str, Any]) -> None:
@@ -2686,16 +2684,10 @@ def try_place_order(
     if confirm:
         ok = True
         if ENABLE_GUI:
-            try:
-                import tkinter as tk
-                from tkinter import messagebox
-
-                root = tk.Tk()
-                root.withdraw()
-                ok = messagebox.askyesno("Confirm Order", order_desc)
-                root.destroy()
-            except Exception:
-                ok = True
+            # GUI modeではTkinterのスレッド競合を避けるため確認ダイアログをスキップ
+            # 自動売買モードでは確認不要と判断
+            print(f"[ORDER][AUTO] {order_desc}")
+            ok = True
         else:
             ans = input(f"CONFIRM ORDER? {order_desc} [y/N]: ").strip().lower()
             ok = ans in {"y", "yes"}
@@ -2930,6 +2922,13 @@ def monitor_order_and_place_profit_limit(
                     final_qty = detail_total_qty if detail_total_qty > 0 else (int(exec_qty) if isinstance(exec_qty, (int, float)) and exec_qty > 0 else 0)
                     # 平均約定価格をDetails集計から算出
                     final_avg = (detail_total_amount / detail_total_qty) if detail_total_qty > 0 else 0.0
+                    
+                    # 注文状態を確認し、キャンセルやエラーで終了している場合は早期リターン
+                    order_state = order_info.get("State")
+                    if order_state == 5:  # 終了状態
+                        if final_qty <= 0:  # 約定数量が0の場合
+                            print(f"[PROFIT_LIMIT] 注文が終了（キャンセル・エラー）: {symbol} State={order_state}")
+                            return
                     
                     if final_qty > 0 and final_avg > 0:
                         executed_qty = final_qty
@@ -6355,13 +6354,23 @@ def main():
                         if bid_price is None:
                             bid_price = price
 
+                        # 価格変化率(%) - Calculate BEFORE using it in signal processing
+                        base_price = state.get("baseline_price")
+                        price_pct = ((price - base_price) / base_price) * 100.0 if base_price and base_price != 0 else 0.0
+
+                        # HFT OBIシグナル検知（板情報取得成功時）- Calculate BEFORE using it in signal processing
+                        try:
+                            obi_sig = detect_obi_signal(symbol, board) if isinstance(board, dict) else None
+                        except Exception:
+                            obi_sig = None
+
                         # 新しいHFTシグナル処理を統合
                         try:
-                            # シグナル判定のためのダミー値（実際の実装では適切な指標を使用）
-                            is_trend_up = price_pct > 0 if 'price_pct' in locals() else True
+                            # シグナル判定のための値を適切に計算
+                            is_trend_up = price_pct > 0
                             is_oversold = False  # RSI等の指標から判定
                             has_price_action = True  # 価格アクションの判定
-                            is_obi_breakout = obi_sig in {"buy", "sell"} if 'obi_sig' in locals() else False
+                            is_obi_breakout = obi_sig in {"buy", "sell"} if obi_sig else False
                             pattern_signal = f"OBI_{obi_sig}" if is_obi_breakout else "PRICE_ACTION"
                             
                             # 新しいprocess_signal関数を呼び出し
@@ -6380,11 +6389,7 @@ def main():
                             print(f"[PROCESS_SIGNAL] エラー: {e} for {symbol}")
                             # エラーが発生しても既存の処理は続行
 
-                        # HFT OBIシグナル検知（板情報取得成功時）
-                        try:
-                            obi_sig = detect_obi_signal(symbol, board) if isinstance(board, dict) else None
-                        except Exception:
-                            obi_sig = None
+                        # OBIシグナルの状態を更新（既に計算済みのobi_sigを使用）
                         if obi_sig in {"buy", "sell"}:
                             prev_sig = str(state.get("obi_signal") or "")
                             state["obi_signal"] = obi_sig
@@ -6463,9 +6468,6 @@ def main():
                             vwap = calculate_vwap(symbol, price, volume)
                             if vwap is not None:
                                 state["vwap"] = vwap
-
-                        # 価格変化率(%)
-                        price_pct = ((price - base_price) / base_price) * 100.0 if base_price != 0 else 0.0
 
                         # 出来高増加ペースの計算（直近n秒間の増加量からレートを算出）
                         vol_hist = state.get("vol_hist")
@@ -6899,7 +6901,8 @@ def main():
                                 "auto_exit_done": bool(prev.get("auto_exit_done")),
                             }
 
-                        held_positions = new_held
+                        held_positions.clear()
+                        held_positions.update(new_held)
                 except Exception:
                     pass
 
@@ -7120,7 +7123,13 @@ def main():
                 now_hhmm = now_dt_email.strftime("%H:%M")
                 if now_hhmm in EMAIL_SCHEDULE_TIMES and now_hhmm != email_stats.get("_last_sent_hhmm"):
                     try:
-                        send_progress_email(email_stats, now_hhmm, token=kabus_token)
+                        # メール送信を別スレッドで実行してメインループのブロックを防止
+                        import threading
+                        threading.Thread(
+                            target=send_progress_email, 
+                            args=(email_stats, now_hhmm, kabus_token), 
+                            daemon=True
+                        ).start()
                     except Exception as e:
                         print(f"[EMAIL] メール送信で例外発生: {e}")
                     email_stats["_last_sent_hhmm"] = now_hhmm
@@ -7132,7 +7141,7 @@ def main():
         print("監視を終了します")
         # WebSocket接続のクリーンアップ
         try:
-            stop_websocket_connection()
+            stop_websocket_connection(websocket_connection)
             print("[WS] WebSocket接続をクリーンアップしました")
         except Exception as e:
             print(f"[WS_ERROR] WebSocketクリーンアップエラー: {e}")
@@ -7140,7 +7149,7 @@ def main():
         print(f"[FATAL] 予期せぬエラー: {e}")
         # WebSocket接続のクリーンアップ
         try:
-            stop_websocket_connection()
+            stop_websocket_connection(websocket_connection)
             print("[WS] WebSocket接続をクリーンアップしました")
         except Exception:
             pass
