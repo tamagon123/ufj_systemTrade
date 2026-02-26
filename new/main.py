@@ -68,45 +68,27 @@ def main():
     symbols = load_universe_csv(conn)
     logger.info(f"ユニバース: {len(symbols)} 銘柄")
 
-    # 3. API トークン取得 & データ更新
-    if not args.no_update:
+    # 3. API データ取得（--batch-only の場合のみ自動実行）
+    #    通常起動時はGUIから手動で実行する
+    if args.batch_only:
         try:
             token = kabus_get_token()
             logger.info("APIトークン取得成功")
 
-            if args.batch_only:
-                # バッチ更新のみ
-                def progress(current, total, symbol):
-                    if current % 100 == 0 or current == total:
-                        logger.info(f"  進捗: {current}/{total} ({symbol})")
+            def progress(current, total, symbol):
+                if current % 100 == 0 or current == total:
+                    logger.info(f"  進捗: {current}/{total} ({symbol})")
 
-                result = run_daily_update(conn, token, symbols, progress_callback=progress)
-                logger.info(f"バッチ更新結果: {result}")
-                conn.close()
-                return
-            else:
-                # バックグラウンドでデータ更新
-                # ※ SQLite は別スレッドから同じ接続を使えないため、
-                #   スレッド専用の接続を作成する
-                def background_update():
-                    try:
-                        bg_conn = init_db()  # スレッド専用 DB 接続
-                        result = run_daily_update(bg_conn, token, symbols)
-                        bg_conn.close()
-                        logger.info(f"バックグラウンド更新完了: {result}")
-                    except Exception as e:
-                        logger.error(f"バックグラウンド更新エラー: {e}")
-
-                update_thread = threading.Thread(
-                    target=background_update, daemon=True
-                )
-                update_thread.start()
-                logger.info("バックグラウンドでデータ更新を開始")
-
+            result = run_daily_update(conn, token, symbols, progress_callback=progress)
+            logger.info(f"バッチ更新結果: {result}")
+            conn.close()
+            return
         except Exception as e:
-            logger.warning(f"APIトークン取得失敗（オフラインモードで続行）: {e}")
-    else:
-        logger.info("データ更新スキップ（--no-update）")
+            logger.error(f"バッチ更新失敗: {e}")
+            conn.close()
+            return
+    elif not args.no_update:
+        logger.info("データ更新はGUIから手動で実行してください（📡 本日データ取得）")
 
     # 4. GUI 起動
     logger.info("GUI起動")
