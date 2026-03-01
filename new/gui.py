@@ -34,7 +34,7 @@ import csv
 
 from config import MA_PARAMS, DB_PATH, BASE_DIR
 from database import init_db, get_daily, get_universe, load_universe_csv
-from signals import add_sma_columns, detect_ma_signals, get_latest_signals
+from signals import add_sma_columns, detect_ma_signals, get_latest_signals, get_signal_score
 from candlestick import detect_all_patterns
 from timeframes import resample_weekly, resample_monthly
 from volume_profile import compute_volume_profile, find_support_resistance
@@ -167,9 +167,23 @@ class TechnicalAnalysisApp:
                   font=("", _fs(10, s))).pack(side=tk.LEFT)
         self.scan_vol_var = tk.StringVar(value="0")
         ttk.Entry(vol_filter_frame, textvariable=self.scan_vol_var,
-                  width=12, font=("", _fs(10, s))).pack(side=tk.LEFT, padx=2)
+                  width=10, font=("", _fs(10, s))).pack(side=tk.LEFT, padx=2)
         ttk.Label(vol_filter_frame, text="株",
                   font=("", _fs(10, s))).pack(side=tk.LEFT)
+
+        # スコアフィルタ
+        score_filter_frame = ttk.Frame(tab_today)
+        score_filter_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
+        ttk.Label(score_filter_frame, text="スコア≧",
+                  font=("", _fs(10, s))).pack(side=tk.LEFT)
+        self.scan_score_min_var = tk.StringVar(value="")
+        ttk.Entry(score_filter_frame, textvariable=self.scan_score_min_var,
+                  width=5, font=("", _fs(10, s))).pack(side=tk.LEFT, padx=2)
+        ttk.Label(score_filter_frame, text="  スコア≦",
+                  font=("", _fs(10, s))).pack(side=tk.LEFT)
+        self.scan_score_max_var = tk.StringVar(value="")
+        ttk.Entry(score_filter_frame, textvariable=self.scan_score_max_var,
+                  width=5, font=("", _fs(10, s))).pack(side=tk.LEFT, padx=2)
 
         # 時間軸チェックボックス
         tf_frame = ttk.Frame(tab_today)
@@ -934,10 +948,12 @@ class TechnicalAnalysisApp:
                         if sig["date"] == last_d:
                             cont = self._count_continuation(
                                 sig["name"], sig["type"], sig_dates_d, df_d.index)
+                            score = get_signal_score(sig["name"])
                             entry = {"code": code, "name": name,
                                      "signal": sig["name"], "type": sig["type"],
                                      "detail": sig["detail"],
-                                     "continuation": cont}
+                                     "continuation": cont,
+                                     "score": score}
                             results["daily"][sig["type"]].append(entry)
 
                     # --- 週足シグナル ---
@@ -959,10 +975,12 @@ class TechnicalAnalysisApp:
                                     if sig["date"] == last_w:
                                         cont = self._count_continuation(
                                             sig["name"], sig["type"], sig_dates_w, df_w.index)
+                                        score = get_signal_score(sig["name"])
                                         entry = {"code": code, "name": name,
                                                  "signal": sig["name"], "type": sig["type"],
                                                  "detail": sig["detail"],
-                                                 "continuation": cont}
+                                                 "continuation": cont,
+                                                 "score": score}
                                         results["weekly"][sig["type"]].append(entry)
 
                     if scan_monthly and len(df) >= 60:
@@ -983,10 +1001,12 @@ class TechnicalAnalysisApp:
                                     if sig["date"] == last_m:
                                         cont = self._count_continuation(
                                             sig["name"], sig["type"], sig_dates_m, df_m.index)
+                                        score = get_signal_score(sig["name"])
                                         entry = {"code": code, "name": name,
                                                  "signal": sig["name"], "type": sig["type"],
                                                  "detail": sig["detail"],
-                                                 "continuation": cont}
+                                                 "continuation": cont,
+                                                 "score": score}
                                         results["monthly"][sig["type"]].append(entry)
 
                 except Exception as e:
@@ -1037,6 +1057,16 @@ class TechnicalAnalysisApp:
         tf_icons = {"daily": "📅", "weekly": "📆", "monthly": "🗓️"}
         tf_units = {"daily": "日目", "weekly": "週目", "monthly": "月目"}
 
+        # スコアフィルタ取得
+        try:
+            score_min = int(self.scan_score_min_var.get().strip()) if self.scan_score_min_var.get().strip() else None
+        except ValueError:
+            score_min = None
+        try:
+            score_max = int(self.scan_score_max_var.get().strip()) if self.scan_score_max_var.get().strip() else None
+        except ValueError:
+            score_max = None
+
         # 全体集計
         grand_bullish = sum(len(results[tf]["bullish"]) for tf in results)
         grand_bearish = sum(len(results[tf]["bearish"]) for tf in results)
@@ -1071,6 +1101,12 @@ class TechnicalAnalysisApp:
             if tf_total == 0:
                 continue
 
+            # 銘柄ごとのスコア合計を計算
+            symbol_scores = {}
+            for r in bullish + bearish:
+                symbol_scores.setdefault(r["code"], 0)
+                symbol_scores[r["code"]] += r.get("score", 0)
+
             label = tf_labels[tf_key]
             icon = tf_icons[tf_key]
 
@@ -1094,6 +1130,13 @@ class TechnicalAnalysisApp:
                     grouped[key]["signals"].append(r)
 
                 for code, info in grouped.items():
+                    total_score = symbol_scores.get(code, 0)
+                    # スコアフィルタ
+                    if score_min is not None and total_score < score_min:
+                        continue
+                    if score_max is not None and total_score > score_max:
+                        continue
+
                     tag_name = f"link_{link_global_idx}"
                     self._today_link_map[tag_name] = code
                     self.today_text.tag_configure(
@@ -1104,14 +1147,17 @@ class TechnicalAnalysisApp:
                         tag_name, "<Button-1>",
                         lambda e, c=code: self._select_symbol(c),
                     )
+                    score_str = f"  [スコア: {total_score:+d}]" if total_score != 0 else ""
                     self.today_text.insert(
-                        tk.END, f"  {code} {info['name']}\n", tag_name)
+                        tk.END, f"  {code} {info['name']}{score_str}\n", tag_name)
                     for sig in info["signals"]:
                         cont = sig.get("continuation", 1)
                         unit = tf_units.get(tf_key, "日目")
                         cont_str = f" (継続{cont}{unit})" if cont > 1 else ""
+                        sig_score = sig.get("score", 0)
+                        score_tag = f" [{sig_score:+d}]" if sig_score != 0 else ""
                         self.today_text.insert(
-                            tk.END, f"    ▸ {sig['signal']}{cont_str}\n", "bullish")
+                            tk.END, f"    ▸ {sig['signal']}{score_tag}{cont_str}\n", "bullish")
                     self.today_text.insert(tk.END, "\n")
                     link_global_idx += 1
 
@@ -1126,24 +1172,34 @@ class TechnicalAnalysisApp:
                     grouped[key]["signals"].append(r)
 
                 for code, info in grouped.items():
+                    total_score = symbol_scores.get(code, 0)
+                    # スコアフィルタ
+                    if score_min is not None and total_score < score_min:
+                        continue
+                    if score_max is not None and total_score > score_max:
+                        continue
+
                     tag_name = f"link_{link_global_idx}"
                     self._today_link_map[tag_name] = code
                     self.today_text.tag_configure(
-                        tag_name, foreground="#89dceb",
+                        tag_name, foreground="#f38ba8",
                         font=("", _fs(10, s), "underline"),
                     )
                     self.today_text.tag_bind(
                         tag_name, "<Button-1>",
                         lambda e, c=code: self._select_symbol(c),
                     )
+                    score_str = f"  [スコア: {total_score:+d}]" if total_score != 0 else ""
                     self.today_text.insert(
-                        tk.END, f"  {code} {info['name']}\n", tag_name)
+                        tk.END, f"  {code} {info['name']}{score_str}\n", tag_name)
                     for sig in info["signals"]:
                         cont = sig.get("continuation", 1)
                         unit = tf_units.get(tf_key, "日目")
                         cont_str = f" (継続{cont}{unit})" if cont > 1 else ""
+                        sig_score = sig.get("score", 0)
+                        score_tag = f" [{sig_score:+d}]" if sig_score != 0 else ""
                         self.today_text.insert(
-                            tk.END, f"    ▸ {sig['signal']}{cont_str}\n", "bearish")
+                            tk.END, f"    ▸ {sig['signal']}{score_tag}{cont_str}\n", "bearish")
                     self.today_text.insert(tk.END, "\n")
                     link_global_idx += 1
 
@@ -1191,6 +1247,7 @@ class TechnicalAnalysisApp:
                         "銘柄名": entry["name"],
                         "シグナル種別": "買い" if sig_type == "bullish" else "売り",
                         "シグナル名": entry["signal"],
+                        "スコア": entry.get("score", 0),
                         "継続": entry.get("continuation", 1),
                         "詳細": entry.get("detail", ""),
                     })
@@ -1198,7 +1255,7 @@ class TechnicalAnalysisApp:
         with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(
                 f, fieldnames=["時間軸", "コード", "銘柄名", "シグナル種別",
-                               "シグナル名", "継続", "詳細"])
+                               "シグナル名", "スコア", "継続", "詳細"])
             writer.writeheader()
             writer.writerows(rows)
 

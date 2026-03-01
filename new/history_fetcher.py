@@ -75,6 +75,76 @@ def fetch_history_single(
         return pd.DataFrame()
 
 
+def _download_and_upsert(codes, start_str, end_str, conn, success, failed, skipped):
+    """指定銘柄リストを yfinance でダウンロードし DB に UPSERT する"""
+    tickers = [_to_yf_ticker(c) for c in codes]
+    ticker_str = " ".join(tickers)
+
+    try:
+        data = yf.download(
+            ticker_str,
+            start=start_str,
+            end=end_str,
+            progress=False,
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+        )
+
+        if data.empty:
+            skipped += len(codes)
+            return success, failed, skipped
+
+        for code, ticker in zip(codes, tickers):
+            try:
+                if len(codes) == 1:
+                    df = data.copy()
+                else:
+                    if ticker not in data.columns.get_level_values(0):
+                        skipped += 1
+                        continue
+                    df = data[ticker].copy()
+
+                df = df.dropna(subset=["Close"] if "Close" in df.columns else ["close"])
+                if df.empty:
+                    skipped += 1
+                    continue
+
+                df = df.rename(columns={
+                    "Open": "open", "High": "high", "Low": "low",
+                    "Close": "close", "Volume": "volume",
+                })
+
+                records = []
+                for date_idx, row in df.iterrows():
+                    date_str = pd.Timestamp(date_idx).strftime("%Y-%m-%d")
+                    records.append({
+                        "symbol": code,
+                        "date": date_str,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": int(row.get("volume", 0)),
+                    })
+
+                if records:
+                    upsert_daily(conn, records)
+                    success += 1
+                else:
+                    skipped += 1
+
+            except Exception as e:
+                failed += 1
+                logger.warning(f"変換/保存失敗: {code} → {e}")
+
+    except Exception as e:
+        failed += len(codes)
+        logger.error(f"ダウンロード失敗: {e}")
+
+    return success, failed, skipped
+
+
 def fetch_history_batch(
     symbols: List[Dict[str, str]],
     conn: sqlite3.Connection,
@@ -117,8 +187,9 @@ def fetch_history_batch(
     for batch_idx, batch in enumerate(batches):
         codes = [s["code"] for s in batch]
 
-        # DBの最新日付を確認して取得済み銘柄をスキップ
-        codes_to_fetch = []
+        # DB の最新日付を確認して 3 グループに分類
+        codes_new = []       # DB にデータなし → フル取得
+        codes_update = []    # DB にデータあるが古い → 差分取得
         for c in codes:
             try:
                 cursor = conn.execute(
@@ -128,15 +199,18 @@ def fetch_history_batch(
                 if row and row[0]:
                     last_db_date = datetime.datetime.strptime(
                         row[0], "%Y-%m-%d").date()
-                    # 昨日以降のデータがあればスキップ
-                    if last_db_date >= end - datetime.timedelta(days=1):
+                    # 4日以内（土日祝を考慮）のデータがあればスキップ
+                    if last_db_date >= end - datetime.timedelta(days=4):
                         skipped += 1
                         continue
-                codes_to_fetch.append(c)
+                    # それ以外は差分取得（最終日の翌日から）
+                    codes_update.append((c, last_db_date))
+                else:
+                    codes_new.append(c)
             except Exception:
-                codes_to_fetch.append(c)
+                codes_new.append(c)
 
-        if not codes_to_fetch:
+        if not codes_new and not codes_update:
             if progress_cb:
                 progress_cb(
                     batch_idx + 1, total_batches,
@@ -144,82 +218,30 @@ def fetch_history_batch(
                 )
             continue
 
-        tickers = [_to_yf_ticker(c) for c in codes_to_fetch]
-        ticker_str = " ".join(tickers)
-
         if progress_cb:
+            n_fetch = len(codes_new) + len(codes_update)
             progress_cb(
                 batch_idx + 1, total_batches,
-                f"バッチ {batch_idx + 1}/{total_batches} ({len(codes)} 銘柄)"
+                f"バッチ {batch_idx + 1}/{total_batches} "
+                f"(新規{len(codes_new)}, 更新{len(codes_update)}, "
+                f"スキップ{len(codes) - n_fetch})"
             )
 
-        try:
-            # yfinance 一括取得
-            data = yf.download(
-                ticker_str,
-                start=start_str,
-                end=end_str,
-                progress=False,
-                auto_adjust=True,
-                group_by="ticker",
-                threads=True,
-            )
+        # --- 新規銘柄: フル期間で取得 ---
+        if codes_new:
+            success, failed, skipped = _download_and_upsert(
+                codes_new, start_str, end_str, conn,
+                success, failed, skipped)
 
-            if data.empty:
-                skipped += len(codes)
-                continue
-
-            # 各銘柄のデータを抽出して UPSERT
-            for code, ticker in zip(codes_to_fetch, tickers):
-                try:
-                    if len(codes_to_fetch) == 1:
-                        # 1銘柄の場合は MultiIndex なし
-                        df = data.copy()
-                    else:
-                        if ticker not in data.columns.get_level_values(0):
-                            skipped += 1
-                            continue
-                        df = data[ticker].copy()
-
-                    # NaN 行を除去
-                    df = df.dropna(subset=["Close"] if "Close" in df.columns else ["close"])
-                    if df.empty:
-                        skipped += 1
-                        continue
-
-                    # カラム名正規化
-                    df = df.rename(columns={
-                        "Open": "open", "High": "high", "Low": "low",
-                        "Close": "close", "Volume": "volume",
-                    })
-
-                    # OHLCV レコードに変換
-                    records = []
-                    for date_idx, row in df.iterrows():
-                        date_str = pd.Timestamp(date_idx).strftime("%Y-%m-%d")
-                        records.append({
-                            "symbol": code,
-                            "date": date_str,
-                            "open": float(row["open"]),
-                            "high": float(row["high"]),
-                            "low": float(row["low"]),
-                            "close": float(row["close"]),
-                            "volume": int(row.get("volume", 0)),
-                        })
-
-                    if records:
-                        upsert_daily(conn, records)
-                        success += 1
-                    else:
-                        skipped += 1
-
-                except Exception as e:
-                    failed += 1
-                    logger.warning(f"変換/保存失敗: {code} → {e}")
-
-        except Exception as e:
-            failed += len(codes_to_fetch)
-            logger.error(f"バッチ取得失敗: {e}")
+        # --- 更新銘柄: 差分取得（最も古い最終日から今日まで） ---
+        if codes_update:
+            # 更新銘柄の中で最も古い最終日を基準にする
+            oldest_last = min(d for _, d in codes_update)
+            update_start = (oldest_last - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            update_codes = [c for c, _ in codes_update]
+            success, failed, skipped = _download_and_upsert(
+                update_codes, update_start, end_str, conn,
+                success, failed, skipped)
 
         logger.info(
             f"過去データ進捗: バッチ {batch_idx + 1}/{total_batches} 完了 "
