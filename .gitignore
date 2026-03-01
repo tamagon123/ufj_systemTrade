@@ -8,3 +8,4 @@ build/
 dist/
 *.spec
 env_presets.json
+market_data.db

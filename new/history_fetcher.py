@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Callable
 import yfinance as yf
 import pandas as pd
 
-from database import upsert_daily
+from database import upsert_daily, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,35 @@ def fetch_history_batch(
 
     for batch_idx, batch in enumerate(batches):
         codes = [s["code"] for s in batch]
-        tickers = [_to_yf_ticker(c) for c in codes]
+
+        # DBの最新日付を確認して取得済み銘柄をスキップ
+        codes_to_fetch = []
+        for c in codes:
+            try:
+                cursor = conn.execute(
+                    "SELECT MAX(date) FROM daily_ohlcv WHERE symbol = ?",
+                    (c,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    last_db_date = datetime.datetime.strptime(
+                        row[0], "%Y-%m-%d").date()
+                    # 昨日以降のデータがあればスキップ
+                    if last_db_date >= end - datetime.timedelta(days=1):
+                        skipped += 1
+                        continue
+                codes_to_fetch.append(c)
+            except Exception:
+                codes_to_fetch.append(c)
+
+        if not codes_to_fetch:
+            if progress_cb:
+                progress_cb(
+                    batch_idx + 1, total_batches,
+                    f"バッチ {batch_idx + 1}/{total_batches} (全て取得済み)"
+                )
+            continue
+
+        tickers = [_to_yf_ticker(c) for c in codes_to_fetch]
         ticker_str = " ".join(tickers)
 
         if progress_cb:
@@ -142,9 +170,9 @@ def fetch_history_batch(
                 continue
 
             # 各銘柄のデータを抽出して UPSERT
-            for code, ticker in zip(codes, tickers):
+            for code, ticker in zip(codes_to_fetch, tickers):
                 try:
-                    if len(codes) == 1:
+                    if len(codes_to_fetch) == 1:
                         # 1銘柄の場合は MultiIndex なし
                         df = data.copy()
                     else:
@@ -190,7 +218,7 @@ def fetch_history_batch(
                     logger.warning(f"変換/保存失敗: {code} → {e}")
 
         except Exception as e:
-            failed += len(codes)
+            failed += len(codes_to_fetch)
             logger.error(f"バッチ取得失敗: {e}")
 
         logger.info(

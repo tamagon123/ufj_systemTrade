@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
+import matplotlib.font_manager as fm
+import csv
 
 from config import MA_PARAMS, DB_PATH, BASE_DIR
 from database import init_db, get_daily, get_universe, load_universe_csv
@@ -42,6 +44,13 @@ from data_pipeline import run_daily_update
 from kabu_api import kabus_get_token
 
 logger = logging.getLogger(__name__)
+
+# 日本語フォント（画像出力用）
+_JP_FONT = None
+for fname in ["Yu Gothic", "MS Gothic", "Meiryo", "Hiragino Sans"]:
+    if any(fname.lower() in f.name.lower() for f in fm.fontManager.ttflist):
+        _JP_FONT = fname
+        break
 
 # ══════════════════════════════════════════════════════════════════════════════
 # フォント設定
@@ -566,14 +575,14 @@ class TechnicalAnalysisApp:
         self._select_symbol(code, switch_tab=True)
 
     def _select_symbol(self, code: str, switch_tab: bool = False):
-        """銘柄を選択してチャートを表示（デフォルト3ヶ月）"""
+        """銘柄を選択してチャートを表示（デフォルト2ヶ月）"""
         self.current_symbol = code
         self._signal_cache = {}
         self._update_chart()
-        # デフォルト表示期間: 3ヶ月
+        # デフォルト表示期間: 2ヶ月
         if not self.current_df.empty:
             end = self.current_df.index[-1]
-            start = end - pd.DateOffset(months=3)
+            start = end - pd.DateOffset(months=2)
             self.date_start_var.set(start.strftime("%Y-%m-%d"))
             self.date_end_var.set(end.strftime("%Y-%m-%d"))
             self._redraw_with_range()
@@ -901,9 +910,13 @@ class TechnicalAnalysisApp:
                     if df.empty or len(df) < 10:
                         continue
 
-                    # 出来高フィルタ: 最終日の出来高が閾値未満ならスキップ
+                    # 出来高フィルタ: 日足基準で最終日の出来高が閾値未満ならスキップ
                     if vol_min > 0 and df["volume"].iloc[-1] < vol_min:
                         continue
+
+                    # 週足・月足用の出来高閾値
+                    vol_min_w = vol_min * 5 if vol_min > 0 else 0
+                    vol_min_m = vol_min * 20 if vol_min > 0 else 0
 
                     name = names_map.get(code, "")
                     scanned += 1
@@ -913,42 +926,68 @@ class TechnicalAnalysisApp:
                     df_d = add_sma_columns(df_d, "daily")
                     last_d = df_d.index[-1]
                     sigs_d = detect_ma_signals(df_d, "daily") + detect_all_patterns(df_d, "daily")
+                    # シグナル(name, type)ごとに全日付を収集（継続カウント用）
+                    sig_dates_d = {}
+                    for sig in sigs_d:
+                        sig_dates_d.setdefault((sig["name"], sig["type"]), set()).add(sig["date"])
                     for sig in sigs_d:
                         if sig["date"] == last_d:
+                            cont = self._count_continuation(
+                                sig["name"], sig["type"], sig_dates_d, df_d.index)
                             entry = {"code": code, "name": name,
                                      "signal": sig["name"], "type": sig["type"],
-                                     "detail": sig["detail"]}
+                                     "detail": sig["detail"],
+                                     "continuation": cont}
                             results["daily"][sig["type"]].append(entry)
 
                     # --- 週足シグナル ---
                     if scan_weekly and len(df) >= 20:
                         df_w = resample_weekly(df)
                         if not df_w.empty and len(df_w) >= 10:
-                            df_w = df_w.tail(80).copy()
-                            df_w = add_sma_columns(df_w, "weekly")
-                            last_w = df_w.index[-1]
-                            sigs_w = detect_ma_signals(df_w, "weekly") + detect_all_patterns(df_w, "weekly")
-                            for sig in sigs_w:
-                                if sig["date"] == last_w:
-                                    entry = {"code": code, "name": name,
-                                             "signal": sig["name"], "type": sig["type"],
-                                             "detail": sig["detail"]}
-                                    results["weekly"][sig["type"]].append(entry)
+                            # 週足出来高フィルタ（入力値×5）
+                            if vol_min_w > 0 and df_w["volume"].iloc[-1] < vol_min_w:
+                                pass  # スキップ
+                            else:
+                                df_w = df_w.tail(80).copy()
+                                df_w = add_sma_columns(df_w, "weekly")
+                                last_w = df_w.index[-1]
+                                sigs_w = detect_ma_signals(df_w, "weekly") + detect_all_patterns(df_w, "weekly")
+                                sig_dates_w = {}
+                                for sig in sigs_w:
+                                    sig_dates_w.setdefault((sig["name"], sig["type"]), set()).add(sig["date"])
+                                for sig in sigs_w:
+                                    if sig["date"] == last_w:
+                                        cont = self._count_continuation(
+                                            sig["name"], sig["type"], sig_dates_w, df_w.index)
+                                        entry = {"code": code, "name": name,
+                                                 "signal": sig["name"], "type": sig["type"],
+                                                 "detail": sig["detail"],
+                                                 "continuation": cont}
+                                        results["weekly"][sig["type"]].append(entry)
 
-                    # --- 月足シグナル ---
                     if scan_monthly and len(df) >= 60:
                         df_m = resample_monthly(df)
                         if not df_m.empty and len(df_m) >= 10:
-                            df_m = df_m.tail(80).copy()
-                            df_m = add_sma_columns(df_m, "monthly")
-                            last_m = df_m.index[-1]
-                            sigs_m = detect_ma_signals(df_m, "monthly") + detect_all_patterns(df_m, "monthly")
-                            for sig in sigs_m:
-                                if sig["date"] == last_m:
-                                    entry = {"code": code, "name": name,
-                                             "signal": sig["name"], "type": sig["type"],
-                                             "detail": sig["detail"]}
-                                    results["monthly"][sig["type"]].append(entry)
+                            # 月足出来高フィルタ（入力値×20）
+                            if vol_min_m > 0 and df_m["volume"].iloc[-1] < vol_min_m:
+                                pass  # スキップ
+                            else:
+                                df_m = df_m.tail(80).copy()
+                                df_m = add_sma_columns(df_m, "monthly")
+                                last_m = df_m.index[-1]
+                                sigs_m = detect_ma_signals(df_m, "monthly") + detect_all_patterns(df_m, "monthly")
+                                sig_dates_m = {}
+                                for sig in sigs_m:
+                                    sig_dates_m.setdefault((sig["name"], sig["type"]), set()).add(sig["date"])
+                                for sig in sigs_m:
+                                    if sig["date"] == last_m:
+                                        cont = self._count_continuation(
+                                            sig["name"], sig["type"], sig_dates_m, df_m.index)
+                                        entry = {"code": code, "name": name,
+                                                 "signal": sig["name"], "type": sig["type"],
+                                                 "detail": sig["detail"],
+                                                 "continuation": cont}
+                                        results["monthly"][sig["type"]].append(entry)
 
                 except Exception as e:
                     logger.debug(f"スキャンスキップ: {code} → {e}")
@@ -972,8 +1011,22 @@ class TechnicalAnalysisApp:
             self.root.after(
                 0, lambda: self._render_today_error(str(e)))
 
+    @staticmethod
+    def _count_continuation(sig_name, sig_type, sig_dates_map, index):
+        """シグナルが最終バーから何本連続しているかカウント（途切れたら0リセット）"""
+        key = (sig_name, sig_type)
+        dates_set = sig_dates_map.get(key, set())
+        count = 0
+        for j in range(len(index) - 1, -1, -1):
+            if index[j] in dates_set:
+                count += 1
+            else:
+                break
+        return count
+
     def _render_today_results(self, results: dict):
         """スキャン結果を「本日のシグナル」タブに時間軸別に表示"""
+        self._last_scan_results = results  # CSV出力用に保持
         s = self.font_scale
         self.scan_btn.config(state=tk.NORMAL)
         self.today_text.config(state=tk.NORMAL)
@@ -982,6 +1035,7 @@ class TechnicalAnalysisApp:
 
         tf_labels = {"daily": "日足", "weekly": "週足", "monthly": "月足"}
         tf_icons = {"daily": "📅", "weekly": "📆", "monthly": "🗓️"}
+        tf_units = {"daily": "日目", "weekly": "週目", "monthly": "月目"}
 
         # 全体集計
         grand_bullish = sum(len(results[tf]["bullish"]) for tf in results)
@@ -995,6 +1049,18 @@ class TechnicalAnalysisApp:
             f"🔴 {grand_bearish} 売り）\n",
             "header",
         )
+
+        if grand_total > 0:
+            self.today_text.tag_configure(
+                "csv_export", foreground="#f9e2af",
+                font=("", _fs(10, s), "underline bold"),
+            )
+            self.today_text.tag_bind(
+                "csv_export", "<Button-1>",
+                lambda e: self._export_scan_csv(),
+            )
+            self.today_text.insert(
+                tk.END, "💾 CSV出力\n", "csv_export")
 
         link_global_idx = 0
 
@@ -1041,8 +1107,11 @@ class TechnicalAnalysisApp:
                     self.today_text.insert(
                         tk.END, f"  {code} {info['name']}\n", tag_name)
                     for sig in info["signals"]:
+                        cont = sig.get("continuation", 1)
+                        unit = tf_units.get(tf_key, "日目")
+                        cont_str = f" (継続{cont}{unit})" if cont > 1 else ""
                         self.today_text.insert(
-                            tk.END, f"    ▸ {sig['signal']}\n", "bullish")
+                            tk.END, f"    ▸ {sig['signal']}{cont_str}\n", "bullish")
                     self.today_text.insert(tk.END, "\n")
                     link_global_idx += 1
 
@@ -1070,8 +1139,11 @@ class TechnicalAnalysisApp:
                     self.today_text.insert(
                         tk.END, f"  {code} {info['name']}\n", tag_name)
                     for sig in info["signals"]:
+                        cont = sig.get("continuation", 1)
+                        unit = tf_units.get(tf_key, "日目")
+                        cont_str = f" (継続{cont}{unit})" if cont > 1 else ""
                         self.today_text.insert(
-                            tk.END, f"    ▸ {sig['signal']}\n", "bearish")
+                            tk.END, f"    ▸ {sig['signal']}{cont_str}\n", "bearish")
                     self.today_text.insert(tk.END, "\n")
                     link_global_idx += 1
 
@@ -1088,6 +1160,52 @@ class TechnicalAnalysisApp:
         self.today_text.insert(
             tk.END, f"スキャンエラー:\n{error_msg}\n", "bearish")
         self.today_text.config(state=tk.DISABLED)
+
+    def _export_scan_csv(self):
+        """スキャン結果をCSVファイルに出力"""
+        if not hasattr(self, "_last_scan_results") or not self._last_scan_results:
+            messagebox.showinfo("CSV出力", "スキャン結果がありません")
+            return
+
+        tf_labels = {"daily": "日足", "weekly": "週足", "monthly": "月足"}
+        save_dir = os.path.join(BASE_DIR, "exports")
+        os.makedirs(save_dir, exist_ok=True)
+        default_name = f"signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        filepath = filedialog.asksaveasfilename(
+            initialdir=save_dir, initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV ファイル", "*.csv")],
+        )
+        if not filepath:
+            return
+
+        rows = []
+        for tf_key in ["daily", "weekly", "monthly"]:
+            tf_data = self._last_scan_results.get(tf_key, {})
+            for sig_type in ["bullish", "bearish"]:
+                for entry in tf_data.get(sig_type, []):
+                    rows.append({
+                        "時間軸": tf_labels.get(tf_key, tf_key),
+                        "コード": entry["code"],
+                        "銘柄名": entry["name"],
+                        "シグナル種別": "買い" if sig_type == "bullish" else "売り",
+                        "シグナル名": entry["signal"],
+                        "継続": entry.get("continuation", 1),
+                        "詳細": entry.get("detail", ""),
+                    })
+
+        with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["時間軸", "コード", "銘柄名", "シグナル種別",
+                               "シグナル名", "継続", "詳細"])
+            writer.writeheader()
+            writer.writerows(rows)
+
+        messagebox.showinfo(
+            "CSV出力",
+            f"スキャン結果を保存しました:\n{filepath}\n\n"
+            f"合計 {len(rows)} 件")
 
     def _on_today_click(self, event):
         """「本日のシグナル」タブの銘柄リンクをクリック"""
@@ -1161,17 +1279,17 @@ class TechnicalAnalysisApp:
 
                 ohlcv_str = (
                     f"{target_date}  "
-                    f"始:{row['open']:,.0f}  "
-                    f"高:{row['high']:,.0f}  "
-                    f"安:{row['low']:,.0f}  "
-                    f"終:{row['close']:,.0f}  "
-                    f"出来高:{row['volume']:,.0f}"
+                    f"\u59CB:{row['open']:,.0f}  "
+                    f"\u9AD8:{row['high']:,.0f}  "
+                    f"\u5B89:{row['low']:,.0f}  "
+                    f"\u7D42:{row['close']:,.0f}  "
+                    f"\u51FA\u6765\u9AD8:{row['volume']:,.0f}"
                 )
                 t = self.fig.text(
-                    0.5, 0.005, ohlcv_str,
-                    ha="center", va="bottom",
+                    0.5, 0.98, ohlcv_str,
+                    ha="center", va="top",
                     fontsize=9, color="#cdd6f4",
-                    fontfamily="monospace",
+                    fontname=_JP_FONT or "sans-serif",
                     bbox=dict(boxstyle="round,pad=0.3",
                               facecolor="#313244", alpha=0.8,
                               edgecolor="#45475a"),
@@ -1191,7 +1309,7 @@ class TechnicalAnalysisApp:
                         all_ma + all_candle,
                         key=lambda s: s["date"], reverse=True)
                     for sig in all_sigs[:5]:
-                        icon = "🟢" if sig["type"] == "bullish" else "🔴"
+                        icon = "[\u8cb7]" if sig["type"] == "bullish" else "[\u58f2]"
                         d = sig["date"].strftime("%m/%d")
                         sig_lines.append(f"{icon} [{d}] {sig['name']}")
 
@@ -1201,7 +1319,7 @@ class TechnicalAnalysisApp:
                         0.98, 0.98, sig_str,
                         ha="right", va="top",
                         fontsize=8, color="#cdd6f4",
-                        fontfamily="sans-serif",
+                        fontname=_JP_FONT or "sans-serif",
                         bbox=dict(boxstyle="round,pad=0.4",
                                   facecolor="#313244", alpha=0.85,
                                   edgecolor="#45475a"),
@@ -1225,15 +1343,41 @@ class TechnicalAnalysisApp:
     # ──────────────────────────────────────────────────────────────────────
     def _on_fetch_daily(self):
         """本日の板データを API 経由で取得"""
-        ok = messagebox.askyesno(
-            "本日データ取得",
-            "kabuStation API から全銘柄の\n"
-            "本日の板情報を取得します。\n\n"
-            "kabuStationが起動している必要があります。\n"
-            "続行しますか？",
-        )
-        if not ok:
-            return
+        # 取得済みフラグ確認
+        flag_path = os.path.join(BASE_DIR, ".daily_fetch_flag.json")
+        already_done = False
+        try:
+            import json
+            if os.path.exists(flag_path):
+                with open(flag_path, "r") as f:
+                    flag = json.load(f)
+                fetch_date = flag.get("date", "")
+                fetch_hour = flag.get("hour", 0)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if fetch_date == today_str and fetch_hour >= 15:
+                    already_done = True
+        except Exception:
+            pass
+
+        if already_done:
+            re_fetch = messagebox.askyesno(
+                "本日データ取得",
+                "本日のデータは既に取得済みです。\n"
+                f"（最終取得: {flag.get('timestamp', '不明')}）\n\n"
+                "再取得しますか？",
+            )
+            if not re_fetch:
+                return
+        else:
+            ok = messagebox.askyesno(
+                "本日データ取得",
+                "kabuStation API から全銘柄の\n"
+                "本日の板情報を取得します。\n\n"
+                "kabuStationが起動している必要があります。\n"
+                "続行しますか？",
+            )
+            if not ok:
+                return
 
         self.daily_progress_win = tk.Toplevel(self.root)
         self.daily_progress_win.title("本日データ取得中...")
@@ -1284,6 +1428,21 @@ class TechnicalAnalysisApp:
             result = run_daily_update(
                 bg_conn, token, symbols, progress_callback=on_progress)
             bg_conn.close()
+
+            # 取得完了フラグを保存
+            try:
+                import json
+                now = datetime.now()
+                flag_path = os.path.join(BASE_DIR, ".daily_fetch_flag.json")
+                with open(flag_path, "w") as f:
+                    json.dump({
+                        "date": now.strftime("%Y-%m-%d"),
+                        "hour": now.hour,
+                        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "success": result.get("success", 0),
+                    }, f)
+            except Exception:
+                pass
 
             def on_done():
                 self.daily_progress_win.destroy()
